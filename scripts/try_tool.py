@@ -31,8 +31,18 @@ tools = sys.modules[PKG + ".tools"]
 
 
 def hermes_rpc_url():
-    """Read plugins.entries.solana-token-facts.settings.rpc_url from Hermes' config.yaml."""
+    """The RPC URL Hermes would use: the SOLANA_TOKEN_FACTS_RPC_URL secret in Hermes' .env,
+    else plugins.entries.solana-token-facts.settings.rpc_url in config.yaml. Never printed."""
     home = os.environ.get("HERMES_HOME") or os.path.join(os.environ.get("LOCALAPPDATA", ""), "hermes")
+    try:
+        for line in Path(home, ".env").read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(rpc.SECRET_ENV + "="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                if val:
+                    os.environ[rpc.SECRET_ENV] = val     # rpc.py reads it from the environment here
+                    return val
+    except OSError:
+        pass
     try:
         text = Path(home, "config.yaml").read_text(encoding="utf-8")
     except OSError:

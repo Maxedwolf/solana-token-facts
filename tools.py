@@ -44,6 +44,13 @@ _ACTIVE_FIELD = {
     "mintCloseAuthority": "closeAuthority",
 }
 
+# Returned with every successful result, so the agent keeps to facts even without the skill.
+HOW_TO_PRESENT = (
+    "State these as on-chain facts with their numbers and links. Do not call the token or the "
+    "developer safe, risky, high-risk, a scam or a rug, and do not use loaded words like 'dumped'. "
+    "Give no buy, sell or timing advice. End with: these are on-chain facts, not trading advice."
+)
+
 # ---------------------------------------------------------------- helpers
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -245,6 +252,7 @@ def get_authorities(mint):
         "extensions": names,
         "risky_extensions": risky,
         "unrecognized_extensions": unrecognized,
+        "how_to_present": HOW_TO_PRESENT,
         "source": _source("getAccountInfo", slot),
     }
 
@@ -385,6 +393,7 @@ def get_holders(mint, top=10):
             "program_address": "Program Derived Address: no private key; a program controls it (often a liquidity pool, vault, lock or bridge).",
         },
         "note": _HOLDERS_NOTE,
+        "how_to_present": HOW_TO_PRESENT,
         "source": {
             "rpc_methods": ["getAccountInfo", "getTokenLargestAccounts", "getMultipleAccounts"],
             "commitment": "finalized",
@@ -576,6 +585,7 @@ def get_origin(mint):
         "programs_invoked": [],
         "pump_fun": pump,
         "links": _links(mint=mint),
+        "how_to_present": HOW_TO_PRESENT,
         "source": {"rpc_methods": methods, "commitment": "finalized", "rpc_host": rpc.endpoint_host()},
     }
 
@@ -913,6 +923,7 @@ def get_dev_launches(wallet=None, mint=None, max_launches=None):
                    "note": "Raise dev_max_launches / dev_max_pages in settings for deeper history (costs more RPC credits)."},
         "links": {"dev_wallet": f"https://solscan.io/account/{wallet}"},
         "disclaimer": "Facts from on-chain data only, not trading advice. You can feed these facts into your own analysis tools or strategies.",
+        "how_to_present": HOW_TO_PRESENT,
         "source": {"rpc_methods": ["getTransactionsForAddress", "getAccountInfo"], "commitment": "finalized",
                    "rpc_host": rpc.endpoint_host()},
     }

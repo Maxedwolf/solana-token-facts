@@ -7,7 +7,8 @@ description: >-
   launches (graduated, dev sold out, timing), recent pump.fun -> PumpSwap graduations. Optional dev reports saved as
   local Markdown notes (e.g. an Obsidian vault). /token slash command. No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
-  (default https://api.mainnet-beta.solana.com, configurable via rpc_url).
+  (default https://api.mainnet-beta.solana.com; or your own provider via the
+  rpc_secret_url secret). Writes local Markdown files only when save_dev_report is called.
 author: Maxed Wolf
 license: MIT
 homepage: https://github.com/Maxedwolf/solana-token-facts
@@ -26,6 +27,11 @@ provides_tools:
   - recent_graduations
 
 config_schema:
+  rpc_secret_url:
+    type: secret
+    env: SOLANA_TOKEN_FACTS_RPC_URL
+    label: "Private RPC URL (with API key)"
+    description: "Recommended. A provider URL such as https://mainnet.helius-rpc.com/?api-key=... Stored as a Hermes secret (.env), never in config.yaml. Used instead of rpc_url when set. token_holders, dev_launches and recent_graduations need a Helius URL."
   rpc_url:
     type: str
     default: "https://api.mainnet-beta.solana.com"

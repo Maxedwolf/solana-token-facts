@@ -60,14 +60,37 @@ def configure(url):
     return False
 
 
+# A private RPC URL usually contains an API key, so it is a Hermes *secret*
+# (config_schema type: secret -> stored in Hermes' .env, read with get_secret),
+# never a plain config.yaml setting. It wins over rpc_url when set.
+SECRET_ENV = "SOLANA_TOKEN_FACTS_RPC_URL"
+
+
+def _secret_url():
+    try:
+        from agent.secret_scope import get_secret   # inside Hermes: honours the active profile
+        val = get_secret(SECRET_ENV, None)
+    except ImportError:                             # standalone (dev scripts): plain environment
+        import os
+        val = os.environ.get(SECRET_ENV)
+    except Exception:
+        val = None
+    return val.strip() if isinstance(val, str) and _is_allowed_url(val) else None
+
+
+def current_url():
+    return _secret_url() or _rpc_url
+
+
 def endpoint_host():
     """Host only, safe to show the model/user (no path, no ?api-key=...)."""
-    return urlparse(_rpc_url).hostname
+    return urlparse(current_url()).hostname
 
 
 def call(method, params, use_cache=True):
     """Call one JSON-RPC method and return its "result". Raises RpcError."""
-    key = json.dumps([_rpc_url, method, params], sort_keys=True)
+    url = current_url()
+    key = json.dumps([url, method, params], sort_keys=True)
 
     if use_cache:
         with _lock:
@@ -75,7 +98,7 @@ def call(method, params, use_cache=True):
             if hit and hit[0] > time.monotonic():
                 return hit[1]
 
-    result = _post(method, params)
+    result = _post(url, method, params)
 
     if use_cache:
         with _lock:
@@ -96,7 +119,7 @@ def _retry_after_seconds(http_error):
         return None
 
 
-def _post(method, params):
+def _post(url, method, params):
     body = json.dumps(
         {"jsonrpc": "2.0", "id": next(_ids), "method": method, "params": params}
     ).encode("utf-8")
@@ -105,7 +128,7 @@ def _post(method, params):
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         last_try = attempt == _MAX_ATTEMPTS
         req = urllib.request.Request(
-            _rpc_url,
+            url,
             data=body,
             method="POST",
             headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},

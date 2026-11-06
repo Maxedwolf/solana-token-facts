@@ -66,7 +66,8 @@ DEV_LAUNCHES = {
         "dev later sold their whole position and how many minutes after launch. Also returns "
         "a plain-language pattern summary and Solscan links. Use when the user asks about a "
         "dev's history, past launches, whether a dev has rugged before, or for a dev report. "
-        "Facts only: never turn the results into a buy/sell recommendation. Requires an RPC "
+        "Facts only: quote summary.pattern, never turn the results into a verdict (safe, risky, "
+        "rug) or a buy/sell/timing recommendation. Requires an RPC "
         "that supports getTransactionsForAddress (Helius)."
     ),
     "parameters": {
