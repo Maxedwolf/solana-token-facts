@@ -29,6 +29,32 @@ TOKEN_AUTHORITIES = {
     },
 }
 
+TOKEN_ORIGIN = {
+    "name": "token_origin",
+    "description": (
+        "Read-only. Find where a Solana token came from, using on-chain history: when it "
+        "was created (UTC time, slot and age in days), the wallet that created it (the fee "
+        "payer of its first transaction), the creation transaction, which launchpad was used "
+        "(pump.fun, Raydium LaunchLab, Meteora, Moonshot, boop.fun) and, for pump.fun tokens, "
+        "whether the token has graduated from its bonding curve. Includes Solscan links. Use "
+        "when the user asks who made a token, when it launched, how old it is, which "
+        "launchpad it came from, or for the developer's wallet. Input must be the token's mint "
+        "address. Very busy tokens may have too much history to reach the first transaction; "
+        "then creation fields are null and the reply says so. Returns JSON. Gives no price or "
+        "trading advice."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "mint": {
+                "type": "string",
+                "description": "Base58 Solana mint address (32-44 characters).",
+            },
+        },
+        "required": ["mint"],
+    },
+}
+
 TOKEN_HOLDERS = {
     "name": "token_holders",
     "description": (

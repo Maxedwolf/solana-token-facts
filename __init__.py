@@ -25,12 +25,24 @@ def register(ctx):
     if not rpc.configure(url):
         logger.warning("solana-token-facts: rpc_url must be https:// (or http://localhost); using default")
 
+    # How far back token_origin may page through history (1 page = 1,000 transactions).
+    try:
+        tools.set_origin_max_pages(ctx.get_config("origin_max_pages", default=tools.DEFAULT_ORIGIN_PAGES))
+    except Exception as exc:
+        logger.warning("solana-token-facts: could not read origin_max_pages (%s); using default", exc)
+
     # 2. Wire each schema (what the model reads) to its handler (what runs).
     ctx.register_tool(
         name="token_authorities",
         toolset=TOOLSET,
         schema=schemas.TOKEN_AUTHORITIES,
         handler=tools.token_authorities,
+    )
+    ctx.register_tool(
+        name="token_origin",
+        toolset=TOOLSET,
+        schema=schemas.TOKEN_ORIGIN,
+        handler=tools.token_origin,
     )
     ctx.register_tool(
         name="token_holders",

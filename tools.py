@@ -5,7 +5,11 @@
 Facts only: if something can't be verified, it's null, never guessed.
 """
 
+import base64
+import hashlib
 import json
+import time
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from . import rpc
@@ -55,6 +59,16 @@ def _b58decode(s):
     return b"\x00" * leading_zeros + body
 
 
+def _b58encode(b):
+    n = int.from_bytes(b, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = _B58_ALPHABET[r] + out
+    leading_zeros = len(b) - len(b.lstrip(b"\x00"))
+    return "1" * leading_zeros + out
+
+
 def is_valid_pubkey(s):
     """True if s is base58 that decodes to exactly 32 bytes (a Solana address)."""
     if not isinstance(s, str) or not 32 <= len(s) <= 44:
@@ -96,6 +110,17 @@ def is_on_curve(pubkey_bytes):
     if x2 == 0:
         return True
     return pow(x2, (_P - 1) // 2, _P) == 1               # Euler: is x^2 a square mod p?
+
+
+def find_program_address(seeds, program_id):
+    """Solana's PDA rule: hash(seeds + bump + program + marker), first result OFF the curve.
+    Returns (address_str, bump). Same answer as solana-py / web3.js findProgramAddress."""
+    prog = _b58decode(program_id)
+    for bump in range(255, -1, -1):
+        h = hashlib.sha256(b"".join(seeds) + bytes([bump]) + prog + b"ProgramDerivedAddress").digest()
+        if not is_on_curve(h):
+            return _b58encode(h), bump
+    return None, None
 
 
 def _pct(part_raw, total_raw):
@@ -306,6 +331,15 @@ def get_holders(mint, top=10):
 
     ranked = sorted(wallets.items(), key=lambda kv: kv[1]["raw"], reverse=True)
 
+    # Name the pump.fun bonding curve if it is a holder (it holds the not-yet-sold supply).
+    labels = {}
+    try:
+        pump = get_pump_curve(mint)
+        if pump:
+            labels[pump["bonding_curve"]] = "pump.fun bonding curve (unsold supply, not a person)"
+    except rpc.RpcError:
+        pass
+
     def owner_type(addr):
         try:
             return "wallet" if is_on_curve(_b58decode(addr)) else "program_address"
@@ -317,6 +351,7 @@ def get_holders(mint, top=10):
             "rank": i + 1,
             "owner": addr,
             "owner_type": owner_type(addr),
+            "label": labels.get(addr),
             "amount": _ui_amount(w["raw"], decimals),
             "pct_of_supply": _pct(w["raw"], supply_raw),
             "token_accounts": w["token_accounts"],
@@ -358,6 +393,233 @@ def token_holders(args, **kwargs):
     try:
         args = args if isinstance(args, dict) else {}
         return _to_json(get_holders(args.get("mint"), args.get("top", 10)))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({
+            "ok": False,
+            "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"},
+        })
+
+
+# ---------------------------------------------------------------- token_origin
+
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+# Launchpad programs we can name. Anything else is still listed by raw program id.
+LAUNCHPADS = {
+    PUMP_FUN_PROGRAM_ID: "pump.fun",
+    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "Raydium LaunchLab",
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "Meteora Dynamic Bonding Curve",
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG": "Moonshot",
+    "boop8hVGQGqehUK2iVEMEnMrL5RbjywRzHKBmBE7ry4": "boop.fun",
+}
+_SIG_PAGE = 1000          # max signatures per getSignaturesForAddress call
+DEFAULT_ORIGIN_PAGES = 10  # up to 10,000 transactions scanned; overridable in settings
+_origin_max_pages = DEFAULT_ORIGIN_PAGES
+
+
+def set_origin_max_pages(n):
+    global _origin_max_pages
+    try:
+        _origin_max_pages = max(1, min(100, int(n)))
+    except (TypeError, ValueError):
+        _origin_max_pages = DEFAULT_ORIGIN_PAGES
+
+
+def _iso(ts):
+    if not isinstance(ts, (int, float)):
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _links(mint=None, wallet=None, tx=None):
+    out = {}
+    if mint:
+        out["mint"] = f"https://solscan.io/token/{mint}"
+    if wallet:
+        out["creator_wallet"] = f"https://solscan.io/account/{wallet}"
+    if tx:
+        out["creation_tx"] = f"https://solscan.io/tx/{tx}"
+    return out
+
+
+def get_pump_curve(mint):
+    """pump.fun bonding curve facts for a mint, or None if it never used pump.fun.
+    Layout: 8-byte discriminator, 5 x u64 reserves/supply, complete (bool) at byte 48,
+    creator (32-byte pubkey) at bytes 49-80. Raises rpc.RpcError."""
+    curve, _ = find_program_address([b"bonding-curve", _b58decode(mint)], PUMP_FUN_PROGRAM_ID)
+    res = rpc.call("getAccountInfo", [curve, {"encoding": "base64", "commitment": "finalized"}])
+    value = (res or {}).get("value") if isinstance(res, dict) else None
+    if not value or value.get("owner") != PUMP_FUN_PROGRAM_ID:
+        return None
+    try:
+        raw = base64.b64decode(value["data"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return {"bonding_curve": curve, "graduated": None, "creator": None}
+    graduated = bool(raw[48]) if len(raw) > 48 else None
+    creator = None
+    if len(raw) >= 81 and any(raw[49:81]):
+        creator = _b58encode(raw[49:81])
+    return {"bonding_curve": curve, "graduated": graduated, "creator": creator}
+
+
+def _first_transaction(address, max_pages):
+    """Walk an address's history backwards to its oldest transaction.
+    Returns (oldest_sig_info or None, pages_used, total_seen, reached_start). Raises rpc.RpcError."""
+    before, oldest, seen = None, None, 0
+    for page in range(1, max_pages + 1):
+        opts = {"limit": _SIG_PAGE, "commitment": "finalized"}
+        if before:
+            opts["before"] = before
+        batch = rpc.call("getSignaturesForAddress", [address, opts]) or []
+        if not isinstance(batch, list):
+            raise rpc.RpcError("bad_response", "Unexpected getSignaturesForAddress reply.")
+        if batch:
+            oldest = batch[-1]
+            before = oldest.get("signature")
+            seen += len(batch)
+        if len(batch) < _SIG_PAGE:
+            return oldest, page, seen, True
+    return oldest, max_pages, seen, False
+
+
+def get_transaction(sig):
+    """getTransaction that accepts every transaction format (legacy, v0 and the newer v1).
+    Asks for v1 support first; if an older RPC rejects that parameter, retries with v0."""
+    opts = {"encoding": "jsonParsed", "commitment": "finalized"}
+    try:
+        return rpc.call("getTransaction", [sig, dict(opts, maxSupportedTransactionVersion=1)])
+    except rpc.RpcError as e:
+        if e.kind != "rpc_error":
+            raise
+        return rpc.call("getTransaction", [sig, dict(opts, maxSupportedTransactionVersion=0)])
+
+
+def _programs_in(tx):
+    """Every program id invoked in a jsonParsed transaction (outer + inner instructions)."""
+    progs = []
+    msg = ((tx or {}).get("transaction") or {}).get("message") or {}
+    groups = [msg.get("instructions") or []]
+    for inner in ((tx or {}).get("meta") or {}).get("innerInstructions") or []:
+        groups.append(inner.get("instructions") or [])
+    for group in groups:
+        for ix in group:
+            pid = ix.get("programId") if isinstance(ix, dict) else None
+            if pid and pid not in progs:
+                progs.append(pid)
+    return progs
+
+
+def _creates_mint(tx, mint):
+    """True if this transaction contains initializeMint/initializeMint2 for this mint."""
+    msg = ((tx or {}).get("transaction") or {}).get("message") or {}
+    groups = [msg.get("instructions") or []]
+    for inner in ((tx or {}).get("meta") or {}).get("innerInstructions") or []:
+        groups.append(inner.get("instructions") or [])
+    for group in groups:
+        for ix in group:
+            parsed = ix.get("parsed") if isinstance(ix, dict) else None
+            if (isinstance(parsed, dict) and str(parsed.get("type", "")).startswith("initializeMint")
+                    and (parsed.get("info") or {}).get("mint") == mint):
+                return True
+    return False
+
+
+def get_origin(mint):
+    """Plain-dict version, reused later by dev_launches and the /token command."""
+    base = get_authorities(mint)
+    if not base.get("ok"):
+        return base
+    mint = base["mint"]
+    methods = ["getAccountInfo", "getSignaturesForAddress", "getTransaction"]
+
+    try:
+        pump = get_pump_curve(mint)
+    except rpc.RpcError:
+        pump = None                                   # optional extra; never fatal
+
+    try:
+        oldest, pages, seen, reached = _first_transaction(mint, _origin_max_pages)
+    except rpc.RpcError as e:
+        return _fail(mint, e.kind, str(e), method="getSignaturesForAddress")
+
+    result = {
+        "ok": True,
+        "mint": mint,
+        "history_scanned": {"transactions": seen, "pages": pages, "reached_first_transaction": reached},
+        "created_at": None,
+        "age_days": None,
+        "created_slot": None,
+        "creation_signature": None,
+        "creator_wallet": None,
+        "creator_basis": None,
+        "fee_payer": None,
+        "creation_tx_confirmed": None,
+        "launchpad": None,
+        "programs_invoked": [],
+        "pump_fun": pump,
+        "links": _links(mint=mint),
+        "source": {"rpc_methods": methods, "commitment": "finalized", "rpc_host": rpc.endpoint_host()},
+    }
+
+    if not reached:
+        result["note"] = (
+            f"This token has more than {seen} transactions, so its first transaction was not reached "
+            "(scan limit is a setting: origin_max_pages). Creation time and creator are unknown."
+        )
+        if pump:
+            # A pump.fun bonding curve exists for this mint, so it launched on pump.fun.
+            result["launchpad"] = {"name": "pump.fun", "program_id": PUMP_FUN_PROGRAM_ID}
+            if pump.get("creator"):
+                result["creator_wallet"] = pump["creator"]
+                result["creator_basis"] = "pump.fun bonding curve 'creator' field"
+                result["links"] = _links(mint=mint, wallet=pump["creator"])
+        return result
+    if oldest is None:
+        result["note"] = "No transactions found for this mint."
+        return result
+
+    sig = oldest.get("signature")
+    try:
+        tx = get_transaction(sig)
+    except rpc.RpcError as e:
+        return _fail(mint, e.kind, str(e), method="getTransaction")
+    if not isinstance(tx, dict):
+        return _fail(mint, "bad_response", "Creation transaction could not be loaded.", method="getTransaction")
+
+    keys = ((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+    fee_payer = None
+    if keys:
+        k0 = keys[0]
+        fee_payer = k0.get("pubkey") if isinstance(k0, dict) else k0
+    programs = _programs_in(tx)
+    pad = next((p for p in programs if p in LAUNCHPADS), None)
+    block_time = tx.get("blockTime", oldest.get("blockTime"))
+
+    result.update({
+        "created_at": _iso(block_time),
+        "age_days": round((time.time() - block_time) / 86400, 2) if isinstance(block_time, (int, float)) else None,
+        "created_slot": tx.get("slot", oldest.get("slot")),
+        "creation_signature": sig,
+        "creator_wallet": fee_payer,
+        "creator_basis": "fee payer (first signer) of the token's first transaction",
+        "creation_tx_confirmed": _creates_mint(tx, mint),
+        "launchpad": {"name": LAUNCHPADS[pad], "program_id": pad} if pad else None,
+        "programs_invoked": programs,
+        "links": _links(mint=mint, wallet=fee_payer, tx=sig),
+    })
+    result["fee_payer"] = fee_payer
+    # On pump.fun the curve's creator is the dev (receives creator fees). It can differ from
+    # the fee payer when an app or relayer paid for the launch, so prefer it.
+    if pump and pump.get("creator"):
+        result["creator_wallet"] = pump["creator"]
+        result["creator_basis"] = "pump.fun bonding curve 'creator' (the account that receives creator fees)"
+        result["links"] = _links(mint=mint, wallet=pump["creator"], tx=sig)
+    return result
+
+
+def token_origin(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_origin(args.get("mint")))
     except Exception as e:  # last-resort safety net: handlers must never raise
         return _to_json({
             "ok": False,

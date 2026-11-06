@@ -4,4 +4,4 @@ __pycache__/
 .venv/
 .env
 scripts/*_log.txt
-scripts/commit_msg.txt
+scripts/commit_msg*.txt
