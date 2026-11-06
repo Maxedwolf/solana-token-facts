@@ -991,7 +991,7 @@ def get_dev_launches(wallet=None, mint=None, max_launches=None):
         pattern = (f"No token launches found in this wallet's last {len(txs)} transactions"
                    + (" (its whole history)." if reached_end else ". Older launches may exist beyond the scan limit."))
     else:
-        pattern = f"{n} launch(es) checked: {grads} graduated, {n - grads} did not."
+        pattern = f"{n} {'launch' if n == 1 else 'launches'} checked: {grads} graduated, {n - grads} did not."
         if sold:
             pattern += f" The dev sold their whole position in {len(sold)} of {n}"
             pattern += f", median {_median(mins)} min after launch." if mins else "."
@@ -1206,13 +1206,14 @@ def get_launch_buyers(mint, slots_after=0):
     others_pct = round(sum(b["bought_pct"] or 0 for b in others), 4) if supply else None
     still = [b for b in others if (b.get("holds_now_pct") or 0) > 0]
     still_pct = round(sum(b["holds_now_pct"] for b in still), 4) if supply else None
-    where = "the creation block" if slots_after == 0 else f"the creation block and the {slots_after} block(s) after it"
-    pattern = f"{len(others)} wallet(s) other than the creator bought in {where}"
+    where = "the creation block" if slots_after == 0 else f"the creation block and the {slots_after} {'block' if slots_after == 1 else 'blocks'} after it"
+    pattern = (f"{len(others)} {'wallet' if len(others) == 1 else 'wallets'} other than the creator "
+               f"bought in {where}")
     pattern += f", {round(others_pct, 2)}% of supply together." if others and others_pct is not None else "."
     if dev and dev.get("bought_pct") is not None:
         pattern += f" The creator bought {round(dev['bought_pct'], 2)}%."
     if others:
-        pattern += f" {len(still)} of them still hold tokens now"
+        pattern += f" {len(still)} of them still {'holds' if len(still) == 1 else 'hold'} tokens now"
         pattern += f" ({round(still_pct, 2)}% of supply)." if still and still_pct is not None else "."
     return {
         "ok": True,
