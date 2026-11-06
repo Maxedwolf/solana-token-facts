@@ -644,6 +644,86 @@ def token_origin(args, **kwargs):
         })
 
 
+# ---------------------------------------------------------------- recent_graduations
+
+# Every pump.fun graduation (migration of liquidity to PumpSwap) is signed by this account,
+# so its transaction history is a list of graduations.
+PUMP_MIGRATION_ACCOUNT = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg"
+_WSOL = "So11111111111111111111111111111111111111112"
+
+
+def _is_migration(tx):
+    logs = (tx.get("meta") or {}).get("logMessages") or []
+    return PUMP_FUN_PROGRAM_ID in _programs_in(tx) and any("Instruction: Migrate" in l for l in logs)
+
+
+def get_recent_graduations(limit=10):
+    """Most recent pump.fun tokens that graduated to PumpSwap (newest first)."""
+    try:
+        limit = max(1, min(25, int(limit)))
+    except (TypeError, ValueError):
+        limit = 10
+    out, token, scanned = [], None, 0
+    for _ in range(3):                                   # at most 3 x 50 transactions
+        cfg = {"transactionDetails": "full", "encoding": "jsonParsed", "sortOrder": "desc", "limit": 50,
+               "maxSupportedTransactionVersion": 1, "filters": {"status": "succeeded"}}
+        if token:
+            cfg["paginationToken"] = token
+        try:
+            r = rpc.call("getTransactionsForAddress", [PUMP_MIGRATION_ACCOUNT, cfg], use_cache=False)
+        except rpc.RpcError as e:
+            msg = str(e)
+            if e.kind == "rpc_error":
+                msg += " recent_graduations needs an RPC that supports getTransactionsForAddress (e.g. a Helius URL)."
+            return {"ok": False, "error": {"kind": e.kind, "message": msg}}
+        data = (r or {}).get("data") or [] if isinstance(r, dict) else []
+        scanned += len(data)
+        for tx in data:
+            if not _is_migration(tx):
+                continue
+            mints = []
+            for b in (tx.get("meta") or {}).get("postTokenBalances") or []:
+                m = b.get("mint")
+                if m and m != _WSOL and m not in mints:
+                    mints.append(m)
+            for m in mints:
+                if any(g["mint"] == m for g in out):
+                    continue
+                # Keep only real graduates: a pump.fun bonding curve that is complete.
+                # (Filters out the pool's LP token and anything else in the same transaction.)
+                try:
+                    curve = get_pump_curve(m)
+                except rpc.RpcError:
+                    curve = None
+                if not curve or curve.get("graduated") is not True:
+                    continue
+                sig = ((tx.get("transaction") or {}).get("signatures") or [None])[0]
+                out.append({"mint": m, "graduated_at": _iso(tx.get("blockTime")), "signature": sig,
+                            "links": {"mint": f"https://solscan.io/token/{m}", "tx": f"https://solscan.io/tx/{sig}"}})
+            if len(out) >= limit:
+                break
+        token = (r or {}).get("paginationToken") if isinstance(r, dict) else None
+        if len(out) >= limit or not token:
+            break
+    return {
+        "ok": True,
+        "graduations": out[:limit],
+        "count": len(out[:limit]),
+        "scanned_transactions": scanned,
+        "next_step": "Use dev_launches(mint=...) or save_dev_report(mint=...) on any of these to check the dev's full history.",
+        "source": {"rpc_methods": ["getTransactionsForAddress"], "account": PUMP_MIGRATION_ACCOUNT,
+                   "commitment": "finalized", "rpc_host": rpc.endpoint_host()},
+    }
+
+
+def recent_graduations(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_recent_graduations(args.get("limit", 10)))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({"ok": False, "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"}})
+
+
 # ---------------------------------------------------------------- dev_launches
 
 DEFAULT_DEV_MAX_LAUNCHES = 5      # how many past launches to report (user setting)

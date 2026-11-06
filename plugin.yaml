@@ -4,7 +4,7 @@ description: >-
   Solana token facts from on-chain data (read-only on-chain): mint and freeze authority,
   supply, Token vs Token-2022 and risky extensions, top holders and supply
   concentration, creation time, creator wallet and launchpad, and a developer's past
-  launches (graduated, dev sold out, timing). Optional dev reports saved as
+  launches (graduated, dev sold out, timing), recent pump.fun -> PumpSwap graduations. Optional dev reports saved as
   local Markdown notes (e.g. an Obsidian vault). /token slash command. No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
   (default https://api.mainnet-beta.solana.com, configurable via rpc_url).
@@ -23,6 +23,7 @@ provides_tools:
   - token_holders
   - dev_launches
   - save_dev_report
+  - recent_graduations
 
 config_schema:
   rpc_url:

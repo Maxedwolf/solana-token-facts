@@ -6,7 +6,7 @@ for a report (save_dev_report). Nothing is ever written on-chain.
 
 import json
 import os
-import re
+import solana_token_facts.rpc as rpc
 from datetime import datetime, timezone
 from pathlib import Path
 

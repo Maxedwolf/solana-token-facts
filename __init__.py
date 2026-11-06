@@ -41,6 +41,7 @@ def register(ctx):
         ("token_holders", schemas.TOKEN_HOLDERS, tools.token_holders),
         ("dev_launches", schemas.DEV_LAUNCHES, tools.dev_launches),
         ("save_dev_report", schemas.SAVE_DEV_REPORT, reports.tool_save_dev_report),
+        ("recent_graduations", schemas.RECENT_GRADUATIONS, tools.recent_graduations),
     ]:
         ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler)
 
@@ -49,7 +50,41 @@ def register(ctx):
                          description="Solana token fact sheet: powers, origin, holders, dev history",
                          args_hint="<mint>")
 
-    # 4. Skill: the due-diligence checklist the agent follows when using these tools.
+    # 4. Automation blueprint: an opt-in scheduled job the user can switch on (/blueprint).
+    #    Hermes' own scheduler runs it; the plugin itself never runs anything in the background.
+    try:
+        ctx.register_automation_blueprint(
+            "graduation-dev-watch",
+            title="PumpSwap graduation dev watch",
+            description=("Every few hours, list new pump.fun -> PumpSwap graduations, check each "
+                         "token's developer history and save a dev report for devs matching your filter."),
+            category="crypto",
+            schedule_template="0 */{interval_hours} * * *",
+            prompt_template=(
+                "Use the solana-token-facts tools. 1) Call recent_graduations with limit {count}. "
+                "2) For each graduated token, call dev_launches with mint=<that token>. "
+                "3) Keep only devs matching this filter: {criteria}. "
+                "4) For each kept dev call save_dev_report with mint=<that token>. "
+                "5) Reply with one line per kept dev: dev wallet, the summary.pattern sentence, and the report path. "
+                "Facts only, no buy/sell or timing advice. If no dev matches, respond with [SILENT]."
+            ),
+            slots=[
+                {"name": "interval_hours", "type": "enum", "label": "How often?", "default": "3",
+                 "options": ["1", "3", "6", "12"], "help": "hours between checks (more often = more RPC credits)"},
+                {"name": "count", "type": "enum", "label": "Graduations per check", "default": "10",
+                 "options": ["5", "10", "25"], "help": "each one costs a dev-history scan"},
+                {"name": "criteria", "type": "text", "label": "Save a report when the dev…",
+                 "default": "has at least 3 launches"},
+                {"name": "deliver", "type": "enum", "label": "Where to deliver?", "default": "origin",
+                 "options": ["origin", "local", "telegram", "discord", "email"], "strict": False},
+            ],
+            skills=["solana-token-facts:token-due-diligence"],
+            tags=["solana", "pumpswap", "dev-history"],
+        )
+    except Exception as exc:
+        logger.warning("solana-token-facts: automation blueprint not registered (%s)", exc)
+
+    # 5. Skill: the due-diligence checklist the agent follows when using these tools.
     try:
         ctx.register_skill("token-due-diligence", _HERE / "skills" / "token-due-diligence" / "SKILL.md",
                            description="Check a Solana token or dev with on-chain facts only (no verdicts).")

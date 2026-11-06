@@ -107,6 +107,25 @@ SAVE_DEV_REPORT = {
     },
 }
 
+RECENT_GRADUATIONS = {
+    "name": "recent_graduations",
+    "description": (
+        "Read-only. List the most recent pump.fun tokens that graduated to PumpSwap (their "
+        "bonding curve completed and liquidity moved to PumpSwap), newest first, with the "
+        "graduation time and Solscan links. Use when the user asks what just graduated, for new "
+        "PumpSwap tokens, or wants devs to research. Then use dev_launches(mint=...) or "
+        "save_dev_report(mint=...) to check a token's developer. Requires a Helius RPC URL. "
+        "Gives no price or trading advice."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "How many graduations to list, 1-25. Default 10.",
+                      "minimum": 1, "maximum": 25},
+        },
+    },
+}
+
 TOKEN_HOLDERS = {
     "name": "token_holders",
     "description": (

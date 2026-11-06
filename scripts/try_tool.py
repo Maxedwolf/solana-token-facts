@@ -79,6 +79,9 @@ if tool_name == "recent_pump_mint":
     sys.exit(0)
 
 reports = sys.modules[PKG + ".reports"]
+if tool_name == "recent_graduations":
+    print(json.dumps(json.loads(tools.recent_graduations({"limit": int(sys.argv[2]) if len(sys.argv) > 2 else 5})), indent=2))
+    sys.exit(0)
 if tool_name == "token_command" and len(sys.argv) >= 3:      # what /token <mint> prints
     print(reports.command_token(sys.argv[2]))
     sys.exit(0)
