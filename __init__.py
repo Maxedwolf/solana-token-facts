@@ -31,6 +31,15 @@ def register(ctx):
     except Exception as exc:
         logger.warning("solana-token-facts: could not read origin_max_pages (%s); using default", exc)
 
+    # How deep dev_launches digs (more = more RPC credits).
+    try:
+        tools.set_dev_limits(
+            ctx.get_config("dev_max_launches", default=tools.DEFAULT_DEV_MAX_LAUNCHES),
+            ctx.get_config("dev_max_pages", default=tools.DEFAULT_DEV_MAX_PAGES),
+        )
+    except Exception as exc:
+        logger.warning("solana-token-facts: could not read dev limits (%s); using defaults", exc)
+
     # 2. Wire each schema (what the model reads) to its handler (what runs).
     ctx.register_tool(
         name="token_authorities",
@@ -43,6 +52,12 @@ def register(ctx):
         toolset=TOOLSET,
         schema=schemas.TOKEN_ORIGIN,
         handler=tools.token_origin,
+    )
+    ctx.register_tool(
+        name="dev_launches",
+        toolset=TOOLSET,
+        schema=schemas.DEV_LAUNCHES,
+        handler=tools.dev_launches,
     )
     ctx.register_tool(
         name="token_holders",

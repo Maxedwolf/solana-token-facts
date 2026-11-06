@@ -83,5 +83,6 @@ if handler is None or len(sys.argv) < 3:
     print(f"No tool named {tool_name!r} in tools.py, or no mint given")
     sys.exit(1)
 
-out = handler({"mint": sys.argv[2]})
+arg = sys.argv[2]
+out = handler({"wallet": arg[7:]} if arg.startswith("wallet:") else {"mint": arg})
 print(json.dumps(json.loads(out), indent=2))

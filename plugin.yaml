@@ -3,7 +3,8 @@ version: 0.1.0
 description: >-
   Read-only Solana token facts from on-chain data: mint and freeze authority,
   supply, Token vs Token-2022 and risky extensions, top holders and supply
-  concentration, creation time, creator wallet and launchpad. No trading, no wallet keys.
+  concentration, creation time, creator wallet and launchpad, and a developer's past
+  launches (graduated, dev sold out, timing). No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
   (default https://api.mainnet-beta.solana.com, configurable via rpc_url).
 author: Maxed Wolf
@@ -19,6 +20,7 @@ provides_tools:
   - token_authorities
   - token_origin
   - token_holders
+  - dev_launches
 
 config_schema:
   rpc_url:
@@ -30,4 +32,14 @@ config_schema:
     type: int
     default: 10
     label: "History scan limit (token_origin)"
-    description: "Max pages of 1,000 transactions token_origin reads to find a token's first transaction. Higher = more RPC credits."
+    description: "Max pages of 1,000 transactions token_origin reads to find a token's first transaction (only used when the RPC lacks getTransactionsForAddress). Higher = more RPC credits."
+  dev_max_launches:
+    type: int
+    default: 5
+    label: "Dev history: launches to report"
+    description: "How many of a developer's most recent launches dev_launches reports (1-1000)."
+  dev_max_pages:
+    type: int
+    default: 5
+    label: "Dev history: scan limit"
+    description: "Max pages of 100 full transactions dev_launches scans per dev (about 10 Helius credits per page). Raise for very active devs."

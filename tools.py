@@ -455,15 +455,29 @@ def get_pump_curve(mint):
     except (KeyError, IndexError, TypeError, ValueError):
         return {"bonding_curve": curve, "graduated": None, "creator": None}
     graduated = bool(raw[48]) if len(raw) > 48 else None
+    total_supply = int.from_bytes(raw[40:48], "little") if len(raw) >= 48 else None
     creator = None
     if len(raw) >= 81 and any(raw[49:81]):
         creator = _b58encode(raw[49:81])
-    return {"bonding_curve": curve, "graduated": graduated, "creator": creator}
+    return {"bonding_curve": curve, "graduated": graduated, "creator_fee_recipient": creator,
+            "total_supply_raw": total_supply}
 
 
 def _first_transaction(address, max_pages):
-    """Walk an address's history backwards to its oldest transaction.
-    Returns (oldest_sig_info or None, pages_used, total_seen, reached_start). Raises rpc.RpcError."""
+    """Find an address's oldest transaction.
+    Fast path: Helius getTransactionsForAddress with sortOrder "asc" (1 call, any history size).
+    Fallback (other RPCs): walk getSignaturesForAddress backwards, max_pages x 1,000.
+    Returns (oldest_sig_info or None, pages_used, total_seen or None, reached_start). Raises rpc.RpcError."""
+    try:
+        r = rpc.call("getTransactionsForAddress",
+                     [address, {"transactionDetails": "signatures", "sortOrder": "asc", "limit": 1}])
+        data = (r or {}).get("data") if isinstance(r, dict) else None
+        if isinstance(data, list):
+            return (data[0] if data else None), 1, None, True
+    except rpc.RpcError as e:
+        if e.kind in ("network_error", "rate_limited"):
+            raise
+        # method not supported by this RPC provider -> use the portable fallback below
     before, oldest, seen = None, None, 0
     for page in range(1, max_pages + 1):
         opts = {"limit": _SIG_PAGE, "commitment": "finalized"}
@@ -563,15 +577,12 @@ def get_origin(mint):
     if not reached:
         result["note"] = (
             f"This token has more than {seen} transactions, so its first transaction was not reached "
-            "(scan limit is a setting: origin_max_pages). Creation time and creator are unknown."
+            "(scan limit is a setting: origin_max_pages; a Helius RPC URL finds it in one call). "
+            "Creation time and creator are unknown."
         )
         if pump:
             # A pump.fun bonding curve exists for this mint, so it launched on pump.fun.
             result["launchpad"] = {"name": "pump.fun", "program_id": PUMP_FUN_PROGRAM_ID}
-            if pump.get("creator"):
-                result["creator_wallet"] = pump["creator"]
-                result["creator_basis"] = "pump.fun bonding curve 'creator' field"
-                result["links"] = _links(mint=mint, wallet=pump["creator"])
         return result
     if oldest is None:
         result["note"] = "No transactions found for this mint."
@@ -607,12 +618,13 @@ def get_origin(mint):
         "links": _links(mint=mint, wallet=fee_payer, tx=sig),
     })
     result["fee_payer"] = fee_payer
-    # On pump.fun the curve's creator is the dev (receives creator fees). It can differ from
-    # the fee payer when an app or relayer paid for the launch, so prefer it.
-    if pump and pump.get("creator"):
-        result["creator_wallet"] = pump["creator"]
-        result["creator_basis"] = "pump.fun bonding curve 'creator' (the account that receives creator fees)"
-        result["links"] = _links(mint=mint, wallet=pump["creator"], tx=sig)
+    signers = [k.get("pubkey") for k in keys if isinstance(k, dict) and k.get("signer")]
+    result["signers"] = signers
+    # pump.fun stores a separate 'creator' that receives creator fees. It can be a wallet that
+    # never signs anything, so it is reported separately and NOT treated as the launcher.
+    if pump and pump.get("creator_fee_recipient") and pump["creator_fee_recipient"] != fee_payer:
+        result["pump_fun"]["note"] = ("The creator-fee recipient differs from the wallet that signed the launch. "
+                                      "creator_wallet is the signer.")
     return result
 
 
@@ -620,6 +632,211 @@ def token_origin(args, **kwargs):
     try:
         args = args if isinstance(args, dict) else {}
         return _to_json(get_origin(args.get("mint")))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({
+            "ok": False,
+            "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"},
+        })
+
+
+# ---------------------------------------------------------------- dev_launches
+
+DEFAULT_DEV_MAX_LAUNCHES = 5      # how many past launches to report (user setting)
+DEFAULT_DEV_MAX_PAGES = 5         # pages of 100 full transactions to scan (user setting)
+_DEV_PAGE = 100
+_dev_max_launches = DEFAULT_DEV_MAX_LAUNCHES
+_dev_max_pages = DEFAULT_DEV_MAX_PAGES
+
+
+def set_dev_limits(max_launches=None, max_pages=None):
+    global _dev_max_launches, _dev_max_pages
+    try:
+        _dev_max_launches = max(1, min(1000, int(max_launches)))
+    except (TypeError, ValueError):
+        _dev_max_launches = DEFAULT_DEV_MAX_LAUNCHES
+    try:
+        _dev_max_pages = max(1, min(500, int(max_pages)))
+    except (TypeError, ValueError):
+        _dev_max_pages = DEFAULT_DEV_MAX_PAGES
+
+
+def _fee_payer(tx):
+    keys = ((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+    if not keys:
+        return None
+    return keys[0].get("pubkey") if isinstance(keys[0], dict) else keys[0]
+
+
+def _minted_in(tx):
+    """Mints initialised in this transaction (initializeMint / initializeMint2)."""
+    found = []
+    msg = (tx.get("transaction") or {}).get("message") or {}
+    groups = [msg.get("instructions") or []]
+    for inner in (tx.get("meta") or {}).get("innerInstructions") or []:
+        groups.append(inner.get("instructions") or [])
+    for group in groups:
+        for ix in group:
+            p = ix.get("parsed") if isinstance(ix, dict) else None
+            if isinstance(p, dict) and str(p.get("type", "")).startswith("initializeMint"):
+                m = (p.get("info") or {}).get("mint")
+                if m and m not in found:
+                    found.append(m)
+    return found
+
+
+def _dev_balance(tx, side, owner, mint):
+    """Raw token amount `owner` held of `mint` before ('pre') or after ('post') this tx; None if absent."""
+    total, seen = 0, False
+    for b in (tx.get("meta") or {}).get(f"{side}TokenBalances") or []:
+        if b.get("owner") == owner and b.get("mint") == mint:
+            try:
+                total += int((b.get("uiTokenAmount") or {}).get("amount"))
+                seen = True
+            except (TypeError, ValueError):
+                pass
+    return total if seen else None
+
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else round((xs[mid - 1] + xs[mid]) / 2, 2)
+
+
+def get_dev_launches(wallet=None, mint=None, max_launches=None):
+    """Plain-dict version, reused by the dev report and /token command."""
+    want = _dev_max_launches
+    if max_launches is not None:
+        try:
+            want = max(1, min(_dev_max_launches, int(max_launches)))
+        except (TypeError, ValueError):
+            pass
+
+    # 1. Who is the dev? Either given directly, or the signer that created `mint`.
+    found_via = None
+    if not wallet and mint:
+        origin = get_origin(mint)
+        if not origin.get("ok"):
+            return origin
+        wallet = origin.get("creator_wallet")
+        found_via = {"mint": origin["mint"], "created_at": origin.get("created_at")}
+        if not wallet:
+            return _fail(origin["mint"], "creator_unknown", "Could not determine who created this token.",
+                         method="getTransactionsForAddress")
+    wallet = wallet.strip() if isinstance(wallet, str) else ""
+    if not is_valid_pubkey(wallet):
+        return _fail(None, "invalid_wallet", "Not a valid Solana wallet address (base58, 32 bytes).",
+                     method="getTransactionsForAddress")
+
+    # 2. Scan the dev's history, newest first, 100 full transactions per page.
+    txs, token, pages, launches = [], None, 0, []
+    for pages in range(1, _dev_max_pages + 1):
+        cfg = {"transactionDetails": "full", "encoding": "jsonParsed", "sortOrder": "desc",
+               "limit": _DEV_PAGE, "maxSupportedTransactionVersion": 1, "filters": {"status": "succeeded"}}
+        if token:
+            cfg["paginationToken"] = token
+        try:
+            r = rpc.call("getTransactionsForAddress", [wallet, cfg])
+        except rpc.RpcError as e:
+            msg = str(e)
+            if e.kind == "rpc_error":
+                msg += " dev_launches needs an RPC that supports getTransactionsForAddress (e.g. a Helius URL in rpc_url)."
+            return _fail(None, e.kind, msg, method="getTransactionsForAddress")
+        data = (r or {}).get("data") or [] if isinstance(r, dict) else []
+        txs.extend(data)
+        for tx in data:
+            if _fee_payer(tx) == wallet:
+                for m in _minted_in(tx):
+                    launches.append({"mint": m, "time": tx.get("blockTime"),
+                                     "signature": ((tx.get("transaction") or {}).get("signatures") or [None])[0],
+                                     "programs": _programs_in(tx)})
+        token = (r or {}).get("paginationToken") if isinstance(r, dict) else None
+        if len(launches) >= want or not token:
+            break
+    reached_end = not token
+    launches = launches[:want]
+
+    # 3. For each launch: graduated? how much did the dev buy, and when (if ever) did they sell out?
+    ordered = sorted(txs, key=lambda t: (t.get("slot") or 0, t.get("transactionIndex") or 0))
+    out = []
+    for L in launches:
+        m, t0 = L["mint"], L["time"]
+        pad = next((p for p in L["programs"] if p in LAUNCHPADS), None)
+        try:
+            pump = get_pump_curve(m) if pad == PUMP_FUN_PROGRAM_ID else None
+        except rpc.RpcError:
+            pump = None
+        supply = (pump or {}).get("total_supply_raw")
+        first_hold, peak, sold_at, last = None, 0, None, None
+        for tx in ordered:
+            if (tx.get("blockTime") or 0) < (t0 or 0):
+                continue
+            pre, post = _dev_balance(tx, "pre", wallet, m), _dev_balance(tx, "post", wallet, m)
+            if post is None and pre is None:
+                continue
+            post = post or 0
+            if first_hold is None and post > 0:
+                first_hold = post
+            peak = max(peak, post)
+            if (pre or 0) > 0 and post == 0 and sold_at is None:
+                sold_at = tx.get("blockTime")
+            last = post
+        out.append({
+            "mint": m,
+            "created_at": _iso(t0),
+            "launchpad": LAUNCHPADS.get(pad) if pad else None,
+            "graduated": (pump or {}).get("graduated"),
+            "dev_initial_buy_pct": _pct(first_hold, supply) if first_hold and supply else None,
+            "dev_sold_out": (sold_at is not None) if first_hold else None,
+            "minutes_to_sell_out": round((sold_at - t0) / 60, 1) if sold_at and t0 else None,
+            "dev_last_known_balance_pct": _pct(last, supply) if last is not None and supply else None,
+            "links": {"mint": f"https://solscan.io/token/{m}"},
+        })
+
+    # 4. Plain-language facts, no advice.
+    n = len(out)
+    grads = sum(1 for x in out if x["graduated"] is True)
+    sold = [x for x in out if x["dev_sold_out"] is True]
+    mins = [x["minutes_to_sell_out"] for x in sold if x["minutes_to_sell_out"] is not None]
+    oldest = min((t.get("blockTime") for t in txs if t.get("blockTime")), default=None)
+    if n == 0:
+        pattern = (f"No token launches found in this wallet's last {len(txs)} transactions"
+                   + (" (its whole history)." if reached_end else ". Older launches may exist beyond the scan limit."))
+    else:
+        pattern = f"{n} launch(es) checked: {grads} graduated, {n - grads} did not."
+        if sold:
+            pattern += f" The dev sold their whole position in {len(sold)} of {n}"
+            pattern += f", median {_median(mins)} min after launch." if mins else "."
+    return {
+        "ok": True,
+        "dev_wallet": wallet,
+        "found_via": found_via,
+        "summary": {
+            "launches_checked": n,
+            "graduated": grads,
+            "not_graduated": n - grads,
+            "dev_sold_out": len(sold),
+            "median_minutes_to_sell_out": _median(mins),
+            "pattern": pattern,
+        },
+        "launches": out,
+        "history_scanned": {"transactions": len(txs), "pages": pages, "reached_wallet_start": reached_end,
+                            "oldest_scanned": _iso(oldest)},
+        "limits": {"max_launches": want, "max_pages": _dev_max_pages,
+                   "note": "Raise dev_max_launches / dev_max_pages in settings for deeper history (costs more RPC credits)."},
+        "links": {"dev_wallet": f"https://solscan.io/account/{wallet}"},
+        "disclaimer": "Facts from on-chain data only, not trading advice. You can feed these facts into your own analysis tools or strategies.",
+        "source": {"rpc_methods": ["getTransactionsForAddress", "getAccountInfo"], "commitment": "finalized",
+                   "rpc_host": rpc.endpoint_host()},
+    }
+
+
+def dev_launches(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_dev_launches(args.get("wallet"), args.get("mint"), args.get("max_launches")))
     except Exception as e:  # last-resort safety net: handlers must never raise
         return _to_json({
             "ok": False,
