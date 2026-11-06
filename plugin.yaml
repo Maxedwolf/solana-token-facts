@@ -1,10 +1,11 @@
 name: solana-token-facts
 version: 0.1.0
 description: >-
-  Read-only Solana token facts from on-chain data: mint and freeze authority,
+  Solana token facts from on-chain data (read-only on-chain): mint and freeze authority,
   supply, Token vs Token-2022 and risky extensions, top holders and supply
   concentration, creation time, creator wallet and launchpad, and a developer's past
-  launches (graduated, dev sold out, timing). No trading, no wallet keys.
+  launches (graduated, dev sold out, timing). Optional dev reports saved as
+  local Markdown notes (e.g. an Obsidian vault). /token slash command. No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
   (default https://api.mainnet-beta.solana.com, configurable via rpc_url).
 author: Maxed Wolf
@@ -21,6 +22,7 @@ provides_tools:
   - token_origin
   - token_holders
   - dev_launches
+  - save_dev_report
 
 config_schema:
   rpc_url:
@@ -43,3 +45,8 @@ config_schema:
     default: 5
     label: "Dev history: scan limit"
     description: "Max pages of 100 full transactions dev_launches scans per dev (about 10 Helius credits per page). Raise for very active devs."
+  reports_dir:
+    type: str
+    default: ""
+    label: "Dev reports folder"
+    description: "Where save_dev_report writes Markdown notes (e.g. a folder inside your Obsidian vault). Empty = Hermes plugin-data/solana-token-facts/dev-reports."

@@ -78,7 +78,12 @@ if tool_name == "recent_pump_mint":
     print(recent_pump_mint() or "none found")
     sys.exit(0)
 
-handler = getattr(tools, tool_name, None)
+reports = sys.modules[PKG + ".reports"]
+if tool_name == "token_command" and len(sys.argv) >= 3:      # what /token <mint> prints
+    print(reports.command_token(sys.argv[2]))
+    sys.exit(0)
+
+handler = getattr(tools, tool_name, None) or getattr(reports, "tool_" + tool_name, None)
 if handler is None or len(sys.argv) < 3:
     print(f"No tool named {tool_name!r} in tools.py, or no mint given")
     sys.exit(1)

@@ -89,6 +89,24 @@ DEV_LAUNCHES = {
     },
 }
 
+SAVE_DEV_REPORT = {
+    "name": "save_dev_report",
+    "description": (
+        "Save a developer's track record (the same facts as dev_launches) as a Markdown note in "
+        "the user's reports folder (Obsidian-friendly; set by the reports_dir setting). Only use "
+        "when the user asks to save, keep, note or document a dev's history or a dev report. "
+        "Give the dev's wallet or a token mint. Returns the file path and the pattern summary. "
+        "Writes a local file only; nothing on-chain."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "wallet": {"type": "string", "description": "The developer's wallet address. Use this OR mint."},
+            "mint": {"type": "string", "description": "A token mint; the report is about the wallet that launched it."},
+        },
+    },
+}
+
 TOKEN_HOLDERS = {
     "name": "token_holders",
     "description": (

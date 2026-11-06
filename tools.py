@@ -359,10 +359,13 @@ def get_holders(mint, top=10):
         for i, (addr, w) in enumerate(ranked[:top])
     ]
 
-    def top_n(n):
-        if not ranked:
+    def top_n(n, rows=None):
+        rows = ranked if rows is None else rows
+        if not rows:
             return None
-        return _pct(sum(w["raw"] for _, w in ranked[:n]), supply_raw)
+        return _pct(sum(w["raw"] for _, w in rows[:n]), supply_raw)
+
+    others = [(a, w) for a, w in ranked if a not in labels]
 
     return {
         "ok": True,
@@ -373,6 +376,8 @@ def get_holders(mint, top=10):
         "token_accounts_scanned": len(accounts),
         "distinct_owners_found": len(wallets),
         "concentration_pct": {"top1": top_n(1), "top5": top_n(5), "top10": top_n(10)},
+        "concentration_excluding_labeled_pct": {"top1": top_n(1, others), "top5": top_n(5, others),
+                                                "top10": top_n(10, others)},
         "top_holders": top_holders,
         "unresolved_accounts": unresolved,
         "owner_type_meaning": {
