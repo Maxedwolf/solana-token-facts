@@ -28,3 +28,34 @@ TOKEN_AUTHORITIES = {
         "required": ["mint"],
     },
 }
+
+TOKEN_HOLDERS = {
+    "name": "token_holders",
+    "description": (
+        "Read-only. Look up who holds the most of a Solana token, from on-chain data: "
+        "the largest holder wallets, how much of the total supply each holds, and how "
+        "concentrated the supply is (top 1, top 5, top 10 holders' combined percentage). "
+        "Each holder is marked 'wallet' (a normal key-pair address) or 'program_address' "
+        "(controlled by a program, often a liquidity pool, vault or lock). Use when the "
+        "user asks who the biggest holders or whales are, whether supply is concentrated, "
+        "or whether a few wallets could dump the token. Input must be the token's mint "
+        "address. Only the 20 largest token accounts are visible, so totals are lower "
+        "bounds. Returns JSON; unknown values are null. Gives no price or trading advice."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "mint": {
+                "type": "string",
+                "description": "Base58 Solana mint address (32-44 characters).",
+            },
+            "top": {
+                "type": "integer",
+                "description": "How many top holder wallets to list, 1-20. Default 10.",
+                "minimum": 1,
+                "maximum": 20,
+            },
+        },
+        "required": ["mint"],
+    },
+}

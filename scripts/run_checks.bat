@@ -19,6 +19,15 @@ where python >nul 2>nul || set "PY=py"
 >>"%LOG%" echo === TEST 2: PYUSD (Token-2022) ===
 %PY% scripts\try_tool.py token_authorities 2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo >>"%LOG%" 2>&1
 >>"%LOG%" echo.
+>>"%LOG%" echo === TEST 2b: token_holders PYUSD ===
+%PY% scripts\try_tool.py token_holders 2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo >>"%LOG%" 2>&1
+>>"%LOG%" echo.
+>>"%LOG%" echo === TEST 2c: token_holders BONK ===
+%PY% scripts\try_tool.py token_holders DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 >>"%LOG%" 2>&1
+>>"%LOG%" echo.
+>>"%LOG%" echo === TEST 2d: token_holders USDC (huge token, may be refused by public RPC) ===
+%PY% scripts\try_tool.py token_holders EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v >>"%LOG%" 2>&1
+>>"%LOG%" echo.
 >>"%LOG%" echo === TEST 3: bad address ===
 %PY% scripts\try_tool.py token_authorities hello >>"%LOG%" 2>&1
 >>"%LOG%" echo.

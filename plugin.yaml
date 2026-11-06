@@ -2,7 +2,8 @@ name: solana-token-facts
 version: 0.1.0
 description: >-
   Read-only Solana token facts from on-chain data: mint and freeze authority,
-  supply, Token vs Token-2022 and risky extensions. No trading, no wallet keys.
+  supply, Token vs Token-2022 and risky extensions, top holders and supply
+  concentration. No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
   (default https://api.mainnet-beta.solana.com, configurable via rpc_url).
 author: Maxed Wolf
@@ -16,6 +17,7 @@ tags: [solana, blockchain, read-only, tokens]
 # Must list EXACTLY the tools register() registers. Add the others as we build them.
 provides_tools:
   - token_authorities
+  - token_holders
 
 config_schema:
   rpc_url:

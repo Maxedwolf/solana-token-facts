@@ -77,6 +77,38 @@ def _ui_amount(raw, decimals):
     return s
 
 
+# Ed25519 curve check. A normal wallet address is a point ON the curve (it has a
+# private key). A Program Derived Address (PDA) is deliberately OFF the curve, so
+# no private key exists and only a program can move its tokens (pools, vaults, locks).
+_P = 2**255 - 19
+_D = (-121665 * pow(121666, _P - 2, _P)) % _P
+
+
+def is_on_curve(pubkey_bytes):
+    """True if these 32 bytes decode to a valid ed25519 point (i.e. a key-pair wallet)."""
+    if len(pubkey_bytes) != 32:
+        return False
+    y = int.from_bytes(pubkey_bytes, "little") & ((1 << 255) - 1)
+    if y >= _P:
+        return False
+    y2 = y * y % _P
+    x2 = (y2 - 1) * pow(_D * y2 + 1, _P - 2, _P) % _P   # x^2 = (y^2-1)/(d*y^2+1)
+    if x2 == 0:
+        return True
+    return pow(x2, (_P - 1) // 2, _P) == 1               # Euler: is x^2 a square mod p?
+
+
+def _pct(part_raw, total_raw):
+    """Exact percentage, rounded to 4 decimal places. None if supply is 0/unknown."""
+    try:
+        total = Decimal(int(total_raw))
+        if total == 0:
+            return None
+        return float(round(Decimal(int(part_raw)) * 100 / total, 4))
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+
+
 def _source(method, slot=None):
     return {
         "rpc_method": method,
@@ -190,6 +222,147 @@ def get_authorities(mint):
         "unrecognized_extensions": unrecognized,
         "source": _source("getAccountInfo", slot),
     }
+
+
+# ---------------------------------------------------------------- token_holders
+
+_HOLDERS_NOTE = (
+    "Based on the 20 largest token accounts, the most the RPC method returns. "
+    "Wallet totals and concentration figures are therefore lower bounds."
+)
+
+
+def get_holders(mint, top=10):
+    """Plain-dict version, reused later by token_fact_sheet."""
+    try:
+        top = max(1, min(20, int(top)))
+    except (TypeError, ValueError):
+        top = 10
+
+    # Step 1: reuse token_authorities. It validates the address, proves it is a
+    # mint, and gives supply + decimals. (Cached, so a fact sheet won't repeat it.)
+    base = get_authorities(mint)
+    if not base.get("ok"):
+        return base
+    mint, supply_raw, decimals = base["mint"], base["supply_raw"], base["decimals"]
+
+    # Step 2: the 20 biggest TOKEN ACCOUNTS (not wallets yet).
+    method = "getTokenLargestAccounts"
+    try:
+        res = rpc.call(method, [mint, {"commitment": "finalized"}])
+    except rpc.RpcError as e:
+        msg = str(e)
+        if "too many accounts" in msg.lower():
+            return _fail(
+                mint, "too_many_holders",
+                "This token has too many holder accounts for the RPC to rank (millions). "
+                "Holder concentration is not available for very large tokens.",
+                method=method,
+            )
+        if e.kind in ("rate_limited", "http_error", "rpc_error"):
+            msg += (
+                " Free public RPC endpoints usually block or heavily rate-limit "
+                "getTokenLargestAccounts. Set the plugin's rpc_url setting to an RPC "
+                "provider URL (many have free tiers) and try again."
+            )
+        return _fail(mint, e.kind, msg, method=method)
+    if not isinstance(res, dict) or not isinstance(res.get("value"), list):
+        return _fail(mint, "bad_response", "Unexpected getTokenLargestAccounts reply.", method=method)
+    slot = (res.get("context") or {}).get("slot")
+    accounts = [a for a in res["value"] if isinstance(a, dict) and a.get("address")]
+
+    # Step 3: who OWNS each token account? One batched call for all of them.
+    owners = {}
+    if accounts:
+        try:
+            multi = rpc.call(
+                "getMultipleAccounts",
+                [[a["address"] for a in accounts], {"encoding": "jsonParsed", "commitment": "finalized"}],
+            )
+        except rpc.RpcError as e:
+            return _fail(mint, e.kind, str(e), method="getMultipleAccounts", slot=slot)
+        values = (multi or {}).get("value") if isinstance(multi, dict) else None
+        for acct, val in zip(accounts, values or []):
+            try:
+                owners[acct["address"]] = val["data"]["parsed"]["info"]["owner"]
+            except (TypeError, KeyError):
+                pass                                # unknown owner -> reported, not guessed
+
+    # Step 4: group token accounts by owner wallet and add up balances.
+    wallets, unresolved = {}, []
+    for a in accounts:
+        try:
+            amount = int(a.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        owner = owners.get(a["address"])
+        if owner is None:
+            unresolved.append({"token_account": a["address"], "amount": _ui_amount(amount, decimals),
+                               "pct_of_supply": _pct(amount, supply_raw)})
+            continue
+        w = wallets.setdefault(owner, {"raw": 0, "token_accounts": []})
+        w["raw"] += amount
+        w["token_accounts"].append(a["address"])
+
+    ranked = sorted(wallets.items(), key=lambda kv: kv[1]["raw"], reverse=True)
+
+    def owner_type(addr):
+        try:
+            return "wallet" if is_on_curve(_b58decode(addr)) else "program_address"
+        except KeyError:
+            return None
+
+    top_holders = [
+        {
+            "rank": i + 1,
+            "owner": addr,
+            "owner_type": owner_type(addr),
+            "amount": _ui_amount(w["raw"], decimals),
+            "pct_of_supply": _pct(w["raw"], supply_raw),
+            "token_accounts": w["token_accounts"],
+        }
+        for i, (addr, w) in enumerate(ranked[:top])
+    ]
+
+    def top_n(n):
+        if not ranked:
+            return None
+        return _pct(sum(w["raw"] for _, w in ranked[:n]), supply_raw)
+
+    return {
+        "ok": True,
+        "mint": mint,
+        "token_program": base["token_program"],
+        "decimals": decimals,
+        "supply": base["supply"],
+        "token_accounts_scanned": len(accounts),
+        "distinct_owners_found": len(wallets),
+        "concentration_pct": {"top1": top_n(1), "top5": top_n(5), "top10": top_n(10)},
+        "top_holders": top_holders,
+        "unresolved_accounts": unresolved,
+        "owner_type_meaning": {
+            "wallet": "Normal key-pair address: whoever holds the private key controls it.",
+            "program_address": "Program Derived Address: no private key; a program controls it (often a liquidity pool, vault, lock or bridge).",
+        },
+        "note": _HOLDERS_NOTE,
+        "source": {
+            "rpc_methods": ["getAccountInfo", "getTokenLargestAccounts", "getMultipleAccounts"],
+            "commitment": "finalized",
+            "slot": slot,
+            "rpc_host": rpc.endpoint_host(),
+        },
+    }
+
+
+def token_holders(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_holders(args.get("mint"), args.get("top", 10)))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({
+            "ok": False,
+            "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"},
+        })
 
 
 def token_authorities(args, **kwargs):

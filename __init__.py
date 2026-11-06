@@ -32,3 +32,9 @@ def register(ctx):
         schema=schemas.TOKEN_AUTHORITIES,
         handler=tools.token_authorities,
     )
+    ctx.register_tool(
+        name="token_holders",
+        toolset=TOOLSET,
+        schema=schemas.TOKEN_HOLDERS,
+        handler=tools.token_holders,
+    )
