@@ -8,7 +8,8 @@ TOKEN_AUTHORITIES = {
         "accounts can be frozen (freeze authority), total supply and decimals, "
         "whether it uses the classic Token program or Token-2022, and any Token-2022 "
         "extensions that give someone extra powers (permanent delegate, transfer hook, "
-        "transfer fees, pausable, and others). Use when the user asks who controls a "
+        "transfer fees, pausable, and others), plus the token's name and symbol and whether its "
+        "metadata (name, symbol, image) can still be changed and by whom (can_change_metadata). Use when the user asks who controls a "
         "token, whether it can be rugged by minting or freezing, or what its supply is. "
         "The input must be the token's mint address, not a wallet or pool address. "
         "Returns JSON. Anything that cannot be verified is null. "
@@ -155,5 +156,51 @@ TOKEN_HOLDERS = {
             },
         },
         "required": ["mint"],
+    },
+}
+
+LAUNCH_BUYERS = {
+    "name": "launch_buyers",
+    "description": (
+        "Read-only. List the wallets that bought a Solana token in the very same block (slot) it was "
+        "created in, optionally plus a few blocks after: how much of the supply each bought, whether "
+        "it is the creator, and how much each still holds now. Same-block buying is what launch "
+        "'bundles' and snipers look like on-chain. Use when the user asks about bundles, snipers, "
+        "insiders, who bought at launch or early buyers. Input is the token's mint address. "
+        "Facts only: quote summary.pattern; do not claim the wallets belong to the dev, that is "
+        "not provable from this data. Requires an RPC that supports getTransactionsForAddress (Helius)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "mint": {"type": "string", "description": "Base58 Solana mint address (32-44 characters)."},
+            "slots_after": {
+                "type": "integer",
+                "description": "Also include this many blocks after the creation block (0-5). Default 0 = creation block only.",
+                "minimum": 0, "maximum": 5,
+            },
+        },
+        "required": ["mint"],
+    },
+}
+
+DEV_FUNDING = {
+    "name": "dev_funding",
+    "description": (
+        "Read-only. Follow the money behind a Solana token developer: which address sent the dev's "
+        "wallet its first SOL, how much, when, how many minutes before the launch, and how many "
+        "different wallets that same funder has sent SOL to in its recent history. Give either the "
+        "dev's wallet or a token mint (the tool finds the wallet that launched it). Use when the user "
+        "asks who funded a dev, where a dev's money came from, about fresh wallets, or for linked "
+        "wallets. Facts only: quote summary.pattern; do not claim the funder is the same person as the "
+        "dev, and do not label the funder an exchange unless the user knows it. Requires an RPC that "
+        "supports getTransactionsForAddress (Helius)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "wallet": {"type": "string", "description": "The developer's wallet address. Use this OR mint."},
+            "mint": {"type": "string", "description": "A token mint; the tool looks up the wallet that launched it."},
+        },
     },
 }

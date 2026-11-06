@@ -171,6 +171,89 @@ def _authority(info, field):
     return value, value is not None
 
 
+# ---------------------------------------------------------------- token metadata
+
+# Metaplex Token Metadata: where most Solana tokens (incl. pump.fun) keep name, symbol and image URI.
+METAPLEX_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+# Signs every pump.fun mint and metadata account it creates (pump.fun's own authority).
+PUMP_FUN_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+_KNOWN_UPDATE_AUTHORITIES = {PUMP_FUN_MINT_AUTHORITY: "pump.fun"}
+
+
+def _borsh_str(raw, pos):
+    """Borsh string: u32 little-endian length, then UTF-8 bytes (Metaplex pads with NULs)."""
+    n = int.from_bytes(raw[pos:pos + 4], "little")
+    if n > 1000 or pos + 4 + n > len(raw):
+        raise ValueError("bad string length")
+    s = raw[pos + 4:pos + 4 + n].decode("utf-8", "replace").rstrip("\x00").strip()
+    return s, pos + 4 + n
+
+
+def parse_metaplex_metadata(raw):
+    """Decode the start of a Metaplex metadata account.
+    Layout: key u8 | update_authority 32 | mint 32 | name | symbol | uri | seller_fee u16 |
+    creators Option<Vec<{address 32, verified u8, share u8}>> | primary_sale_happened u8 | is_mutable u8.
+    Returns a dict, or None if the bytes don't fit that layout."""
+    try:
+        if len(raw) < 65 + 12 or raw[0] != 4:          # key 4 = MetadataV1
+            return None
+        update_authority = _b58encode(raw[1:33])
+        name, pos = _borsh_str(raw, 65)
+        symbol, pos = _borsh_str(raw, pos)
+        uri, pos = _borsh_str(raw, pos)
+        pos += 2                                         # seller_fee_basis_points
+        creators = []
+        if raw[pos] == 1:
+            count = int.from_bytes(raw[pos + 1:pos + 5], "little")
+            pos += 5
+            for _ in range(min(count, 5)):
+                creators.append({"address": _b58encode(raw[pos:pos + 32]), "verified": bool(raw[pos + 32])})
+                pos += 34
+            pos += 34 * max(0, count - 5)
+        else:
+            pos += 1
+        is_mutable = bool(raw[pos + 1])                  # skip primary_sale_happened
+        return {"update_authority": update_authority, "name": name, "symbol": symbol, "uri": uri,
+                "creators": creators, "is_mutable": is_mutable}
+    except (IndexError, ValueError):
+        return None
+
+
+def get_metadata(mint, mint_info=None):
+    """Who can still change the token's name, symbol and image? Never raises; None if unknown.
+    Token-2022 tokens can keep metadata inside the mint (tokenMetadata extension); everything
+    else uses a Metaplex metadata account at PDA ["metadata", program, mint]."""
+    for ext in (mint_info or {}).get("extensions") or []:
+        if isinstance(ext, dict) and ext.get("extension") == "tokenMetadata":
+            st = ext.get("state") or {}
+            ua = st.get("updateAuthority")
+            return {"standard": "token-2022 tokenMetadata", "account": mint, "name": st.get("name"),
+                    "symbol": st.get("symbol"), "uri": st.get("uri"), "update_authority": ua,
+                    "update_authority_label": _KNOWN_UPDATE_AUTHORITIES.get(ua),
+                    "is_mutable": ua is not None, "can_change": ua is not None}
+    try:
+        pda, _ = find_program_address([b"metadata", _b58decode(METAPLEX_METADATA_PROGRAM_ID), _b58decode(mint)],
+                                      METAPLEX_METADATA_PROGRAM_ID)
+        res = rpc.call("getAccountInfo", [pda, {"encoding": "base64", "commitment": "finalized"}])
+        value = (res or {}).get("value") if isinstance(res, dict) else None
+        if not value or value.get("owner") != METAPLEX_METADATA_PROGRAM_ID:
+            return {"standard": None, "account": pda, "name": None, "symbol": None, "uri": None,
+                    "update_authority": None, "is_mutable": None, "can_change": None,
+                    "note": "No Metaplex metadata account found for this mint."}
+        md = parse_metaplex_metadata(base64.b64decode(value["data"][0]))
+    except (rpc.RpcError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    if md is None:
+        return {"standard": "metaplex", "account": pda, "is_mutable": None, "can_change": None,
+                "note": "Metadata account could not be decoded."}
+    ua = md["update_authority"]
+    return {"standard": "metaplex", "account": pda, "name": md["name"], "symbol": md["symbol"],
+            "uri": md["uri"], "update_authority": ua, "update_authority_label": _KNOWN_UPDATE_AUTHORITIES.get(ua),
+            "is_mutable": md["is_mutable"],
+            # Metaplex: changes need is_mutable AND an update authority that isn't the all-zero key.
+            "can_change": md["is_mutable"] and ua != "11111111111111111111111111111111"}
+
+
 # ---------------------------------------------------------------- token_authorities
 
 def get_authorities(mint):
@@ -236,9 +319,15 @@ def get_authorities(mint):
         elif name not in BENIGN_EXTENSIONS:
             unrecognized.append(name)
 
+    metadata = get_metadata(mint, info)
+
     return {
         "ok": True,
         "mint": mint,
+        "name": (metadata or {}).get("name"),
+        "symbol": (metadata or {}).get("symbol"),
+        "can_change_metadata": (metadata or {}).get("can_change"),
+        "metadata": metadata,
         "token_program": program,
         "token_program_id": owner,
         "decimals": decimals,
@@ -574,6 +663,7 @@ def get_origin(mint):
         "mint": mint,
         "history_scanned": {"transactions": seen, "pages": pages, "reached_first_transaction": reached},
         "created_at": None,
+        "created_unix": None,
         "age_days": None,
         "created_slot": None,
         "creation_signature": None,
@@ -622,6 +712,7 @@ def get_origin(mint):
 
     result.update({
         "created_at": _iso(block_time),
+        "created_unix": block_time if isinstance(block_time, (int, float)) else None,
         "age_days": round((time.time() - block_time) / 86400, 2) if isinstance(block_time, (int, float)) else None,
         "created_slot": tx.get("slot", oldest.get("slot")),
         "creation_signature": sig,
@@ -949,3 +1040,354 @@ def token_authorities(args, **kwargs):
             "ok": False,
             "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"},
         })
+
+
+# ---------------------------------------------------------------- shared: balance and SOL-transfer readers
+
+_SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
+
+
+def _token_deltas(tx, mint):
+    """{owner: post - pre} raw amounts of `mint` for every owner whose balance changed in this tx."""
+    bal = {}
+    meta = tx.get("meta") or {}
+    for side, sign in (("pre", -1), ("post", 1)):
+        for b in meta.get(f"{side}TokenBalances") or []:
+            if b.get("mint") != mint or not b.get("owner"):
+                continue
+            try:
+                amt = int((b.get("uiTokenAmount") or {}).get("amount"))
+            except (TypeError, ValueError):
+                continue
+            bal[b["owner"]] = bal.get(b["owner"], 0) + sign * amt
+    return {o: d for o, d in bal.items() if d != 0}
+
+
+def _sol_transfers(tx):
+    """Every System Program SOL movement in a jsonParsed tx: [(source, destination, lamports)]."""
+    out = []
+    msg = (tx.get("transaction") or {}).get("message") or {}
+    groups = [msg.get("instructions") or []]
+    for inner in (tx.get("meta") or {}).get("innerInstructions") or []:
+        groups.append(inner.get("instructions") or [])
+    for group in groups:
+        for ix in group:
+            if not isinstance(ix, dict) or ix.get("programId") != _SYSTEM_PROGRAM_ID:
+                continue
+            p = ix.get("parsed")
+            if not isinstance(p, dict):
+                continue
+            info, kind = p.get("info") or {}, p.get("type")
+            if kind in ("transfer", "transferWithSeed"):
+                src, dst = info.get("source"), info.get("destination")
+            elif kind in ("createAccount", "createAccountWithSeed"):
+                src, dst = info.get("source"), info.get("newAccount")
+            else:
+                continue
+            try:
+                lamports = int(info.get("lamports"))
+            except (TypeError, ValueError):
+                continue
+            if src and dst and lamports > 0:
+                out.append((src, dst, lamports))
+    return out
+
+
+def _sig(tx):
+    return ((tx.get("transaction") or {}).get("signatures") or [None])[0]
+
+
+def _sol(lamports):
+    return float(round(Decimal(lamports) / Decimal(10**9), 4))
+
+
+def _is_wallet(address):
+    try:
+        return is_on_curve(_b58decode(address))
+    except (KeyError, ValueError):
+        return False
+
+
+def _gtfa(address, sort="asc", limit=100, token=None):
+    """One page of Helius getTransactionsForAddress with full jsonParsed transactions. Raises rpc.RpcError."""
+    cfg = {"transactionDetails": "full", "encoding": "jsonParsed", "sortOrder": sort, "limit": limit,
+           "maxSupportedTransactionVersion": 1, "filters": {"status": "succeeded"}}
+    if token:
+        cfg["paginationToken"] = token
+    r = rpc.call("getTransactionsForAddress", [address, cfg])
+    if not isinstance(r, dict):
+        return [], None
+    return (r.get("data") or []), r.get("paginationToken")
+
+
+def _needs_helius(e, tool):
+    msg = str(e)
+    if e.kind == "rpc_error":
+        msg += f" {tool} needs an RPC that supports getTransactionsForAddress (e.g. a Helius URL)."
+    return msg
+
+
+def _token_balance_now(owner, mint):
+    """Current raw balance of `mint` across all of owner's token accounts, or None if unknown."""
+    try:
+        r = rpc.call("getTokenAccountsByOwner", [owner, {"mint": mint},
+                                                 {"encoding": "jsonParsed", "commitment": "finalized"}])
+    except rpc.RpcError:
+        return None
+    total = 0
+    accounts = (r.get("value") or []) if isinstance(r, dict) else []
+    for acc in accounts:
+        try:
+            total += int(acc["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return total
+
+
+# ---------------------------------------------------------------- launch_buyers
+
+_MAX_BUYER_LOOKUPS = 20
+
+
+def get_launch_buyers(mint, slots_after=0):
+    """Wallets that bought in the token's creation block (slot), optionally a few blocks after."""
+    try:
+        slots_after = max(0, min(5, int(slots_after or 0)))
+    except (TypeError, ValueError):
+        slots_after = 0
+    origin = get_origin(mint)
+    if not origin.get("ok"):
+        return origin
+    mint = origin["mint"]
+    slot0, creator = origin.get("created_slot"), origin.get("creator_wallet")
+    if slot0 is None:
+        return _fail(mint, "creation_unknown", origin.get("note") or "Creation block could not be found.",
+                     method="getTransactionsForAddress")
+    last_slot = slot0 + slots_after
+    supply = ((origin.get("pump_fun") or {}).get("total_supply_raw")
+              or int(get_authorities(mint).get("supply_raw") or 0) or None)
+
+    buyers, token, scanned, complete = {}, None, 0, False
+    try:
+        for _ in range(3):                                # at most 300 of the token's first transactions
+            data, token = _gtfa(mint, "asc", 100, token)
+            for tx in data:
+                if (tx.get("slot") or 0) > last_slot:
+                    complete = True
+                    break
+                scanned += 1
+                for owner, delta in _token_deltas(tx, mint).items():
+                    if delta <= 0 or not _is_wallet(owner):   # program addresses = curve/pool, not buyers
+                        continue
+                    b = buyers.setdefault(owner, {"wallet": owner, "is_creator": owner == creator,
+                                                  "bought_raw": 0, "slot": tx.get("slot"), "first_tx": _sig(tx)})
+                    b["bought_raw"] += delta
+            if complete or not token:
+                complete = True
+                break
+    except rpc.RpcError as e:
+        return _fail(mint, e.kind, _needs_helius(e, "launch_buyers"), method="getTransactionsForAddress")
+
+    rows = sorted(buyers.values(), key=lambda b: -b["bought_raw"])
+    for i, b in enumerate(rows):
+        b["bought_pct"] = _pct(b["bought_raw"], supply) if supply else None
+        b["slot_offset"] = (b["slot"] - slot0) if b.get("slot") is not None else None
+        if i < _MAX_BUYER_LOOKUPS:
+            now = _token_balance_now(b["wallet"], mint)
+            b["holds_now_pct"] = _pct(now, supply) if now is not None and supply else None
+        else:
+            b["holds_now_pct"] = None
+        b["links"] = {"wallet": f"https://solscan.io/account/{b['wallet']}",
+                      "tx": f"https://solscan.io/tx/{b['first_tx']}"}
+        b["bought_raw"] = str(b["bought_raw"])
+
+    others = [b for b in rows if not b["is_creator"]]
+    dev = next((b for b in rows if b["is_creator"]), None)
+    others_pct = round(sum(b["bought_pct"] or 0 for b in others), 4) if supply else None
+    still = [b for b in others if (b.get("holds_now_pct") or 0) > 0]
+    still_pct = round(sum(b["holds_now_pct"] for b in still), 4) if supply else None
+    where = "the creation block" if slots_after == 0 else f"the creation block and the {slots_after} block(s) after it"
+    pattern = f"{len(others)} wallet(s) other than the creator bought in {where}"
+    pattern += f", {round(others_pct, 2)}% of supply together." if others and others_pct is not None else "."
+    if dev and dev.get("bought_pct") is not None:
+        pattern += f" The creator bought {round(dev['bought_pct'], 2)}%."
+    if others:
+        pattern += f" {len(still)} of them still hold tokens now"
+        pattern += f" ({round(still_pct, 2)}% of supply)." if still and still_pct is not None else "."
+    return {
+        "ok": True,
+        "mint": mint,
+        "creation_slot": slot0,
+        "window_slots": [slot0, last_slot],
+        "created_at": origin.get("created_at"),
+        "creator_wallet": creator,
+        "summary": {"other_buyers": len(others), "other_buyers_pct": others_pct,
+                    "creator_bought_pct": (dev or {}).get("bought_pct"),
+                    "still_holding": len(still), "still_holding_pct": still_pct, "pattern": pattern},
+        "buyers": rows,
+        "transactions_scanned": scanned,
+        "complete": complete,
+        "notes": [
+            "A buyer is any key-pair wallet whose balance of this token went up in a transaction in the window. "
+            "Program addresses (bonding curve, pools) are excluded.",
+            "Buying in the same block as creation is only possible if the transaction was sent at the same moment "
+            "as the launch; that is a fact about timing, not proof of who controls the wallets.",
+            f"holds_now_pct is checked for the {_MAX_BUYER_LOOKUPS} largest buyers.",
+        ],
+        "how_to_present": HOW_TO_PRESENT,
+        "source": {"rpc_methods": ["getTransactionsForAddress", "getTokenAccountsByOwner", "getAccountInfo"],
+                   "commitment": "finalized", "rpc_host": rpc.endpoint_host()},
+    }
+
+
+def launch_buyers(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_launch_buyers(args.get("mint"), args.get("slots_after", 0)))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({"ok": False, "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"}})
+
+
+# ---------------------------------------------------------------- dev_funding
+
+_DUST_LAMPORTS = 10_000_000         # < 0.01 SOL: spam, airdrops, rebates and address poisoning, not funding
+
+
+def _span(minutes):
+    """12.3 -> '12.3 min', 300 -> '5.0 hours', 5000 -> '3.5 days'."""
+    if minutes is None:
+        return None
+    if minutes < 120:
+        return f"{round(minutes, 1)} min"
+    if minutes < 2880:
+        return f"{round(minutes / 60, 1)} hours"
+    return f"{round(minutes / 1440, 1)} days"
+
+
+def _incoming(txs, wallet):
+    """Non-dust SOL transfers into `wallet`, in the order of `txs`."""
+    out = []
+    for tx in txs:
+        for src, dst, lamports in _sol_transfers(tx):
+            if dst == wallet and src != wallet and lamports >= _DUST_LAMPORTS:
+                out.append({"from": src, "sol": _sol(lamports), "time": tx.get("blockTime"), "tx": _sig(tx)})
+    return out
+
+
+def _funding_fact(f, launch_time):
+    mins = round((launch_time - f["time"]) / 60, 1) if launch_time and f.get("time") else None
+    return {"from": f["from"], "sol": f["sol"], "at": _iso(f["time"]), "tx": f["tx"],
+            "from_is_wallet": _is_wallet(f["from"]), "minutes_before_launch": mins,
+            "before_launch": _span(mins),
+            "links": {"from": f"https://solscan.io/account/{f['from']}", "tx": f"https://solscan.io/tx/{f['tx']}"}}
+
+
+def _fanout(funder):
+    """How many different wallets `funder` sent SOL to in its last 100 transactions."""
+    try:
+        f_txs, _ = _gtfa(funder, "desc", 100)
+    except rpc.RpcError:
+        return None
+    recipients, sent = set(), 0
+    for tx in f_txs:
+        for src, dst, lamports in _sol_transfers(tx):
+            if src == funder and dst != funder and lamports >= _DUST_LAMPORTS:
+                recipients.add(dst)
+                sent += 1
+    times = [t.get("blockTime") for t in f_txs if t.get("blockTime")]
+    return {
+        "address": funder,
+        "is_wallet": _is_wallet(funder),
+        "recent_transactions_scanned": len(f_txs),
+        "scanned_period_hours": round((max(times) - min(times)) / 3600, 2) if len(times) > 1 else None,
+        "scanned_from": _iso(min(times)) if times else None,
+        "sol_transfers_out": sent,
+        "distinct_wallets_funded": len(recipients),
+        "note": ("Counts cover only the funder's most recent transactions. A funder that sends SOL to very "
+                 "many wallets per hour is often an exchange or payment service; that is context, not a label."),
+    }
+
+
+def get_dev_funding(wallet=None, mint=None):
+    """Who funded the dev wallet: its first-ever SOL, the last SOL before the launch, and the funder's fan-out."""
+    launch_time = launch_slot = found_via = None
+    if not wallet and mint:
+        origin = get_origin(mint)
+        if not origin.get("ok"):
+            return origin
+        wallet = origin.get("creator_wallet")
+        launch_time, launch_slot = origin.get("created_unix"), origin.get("created_slot")
+        found_via = {"mint": origin["mint"], "created_at": origin.get("created_at")}
+        if not wallet:
+            return _fail(origin["mint"], "creator_unknown", "Could not determine who created this token.",
+                         method="getTransactionsForAddress")
+    wallet = wallet.strip() if isinstance(wallet, str) else ""
+    if not is_valid_pubkey(wallet):
+        return _fail(None, "invalid_wallet", "Not a valid Solana wallet address (base58, 32 bytes).",
+                     method="getTransactionsForAddress")
+
+    try:
+        first_txs, _ = _gtfa(wallet, "asc", 50)                       # the wallet's oldest transactions
+        before = []
+        if launch_slot is not None:                                   # newest transactions before the launch
+            cfg = {"transactionDetails": "full", "encoding": "jsonParsed", "sortOrder": "desc", "limit": 50,
+                   "maxSupportedTransactionVersion": 1,
+                   "filters": {"status": "succeeded", "slot": {"lt": launch_slot}}}
+            r = rpc.call("getTransactionsForAddress", [wallet, cfg])
+            before = (r.get("data") or []) if isinstance(r, dict) else []
+    except rpc.RpcError as e:
+        return _fail(None, e.kind, _needs_helius(e, "dev_funding"), method="getTransactionsForAddress")
+
+    first_in = _incoming(first_txs, wallet)
+    last_in = _incoming(before, wallet)                               # newest first
+    result = {
+        "ok": True,
+        "dev_wallet": wallet,
+        "found_via": found_via,
+        "wallet_first_activity": _iso(first_txs[0].get("blockTime")) if first_txs else None,
+        "first_funding": _funding_fact(first_in[0], launch_time) if first_in else None,
+        "last_funding_before_launch": _funding_fact(last_in[0], launch_time) if last_in else None,
+        "early_funders": [],
+        "funder": None,
+        "links": {"dev_wallet": f"https://solscan.io/account/{wallet}"},
+        "how_to_present": HOW_TO_PRESENT,
+        "source": {"rpc_methods": ["getTransactionsForAddress"], "commitment": "finalized",
+                   "rpc_host": rpc.endpoint_host()},
+    }
+    totals = {}
+    for i in first_in:
+        totals[i["from"]] = round(totals.get(i["from"], 0) + i["sol"], 4)
+    result["early_funders"] = [{"from": k, "sol_total": v} for k, v in list(totals.items())[:5]]
+
+    key = result["last_funding_before_launch"] or result["first_funding"]
+    if not key:
+        result["summary"] = {"pattern": f"No incoming SOL transfer (0.01 SOL or more) found in the scanned history "
+                                        f"of this wallet ({len(first_txs)} oldest transactions checked)."}
+        return result
+    result["funder"] = _fanout(key["from"])
+
+    def who(a):
+        return f"{a[:4]}...{a[-4:]}"
+    parts = []
+    lf, ff = result["last_funding_before_launch"], result["first_funding"]
+    if lf:
+        parts.append(f"Before this launch, the dev wallet last received SOL from {who(lf['from'])} "
+                     f"({lf['sol']} SOL, {lf['before_launch']} before launch).")
+    if ff and (not lf or ff["tx"] != lf["tx"]):
+        parts.append(f"Its first SOL ever came from {who(ff['from'])} ({ff['sol']} SOL"
+                     + (f", {ff['before_launch']} before launch)." if ff["before_launch"] else f", on {ff['at']})."))
+    fu = result["funder"]
+    if fu and fu["recent_transactions_scanned"]:
+        parts.append(f"In its last {fu['recent_transactions_scanned']} transactions"
+                     + (f" (about {_span(fu['scanned_period_hours'] * 60)})" if fu["scanned_period_hours"] is not None else "")
+                     + f", {who(fu['address'])} sent SOL to {fu['distinct_wallets_funded']} different wallets.")
+    result["summary"] = {"pattern": " ".join(parts)}
+    return result
+
+
+def dev_funding(args, **kwargs):
+    try:
+        args = args if isinstance(args, dict) else {}
+        return _to_json(get_dev_funding(args.get("wallet"), args.get("mint")))
+    except Exception as e:  # last-resort safety net: handlers must never raise
+        return _to_json({"ok": False, "error": {"kind": "internal_error", "message": f"{type(e).__name__}: {e}"}})

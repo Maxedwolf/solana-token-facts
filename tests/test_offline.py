@@ -227,7 +227,10 @@ class TestReportsAndHandlers(Base):
                   "links": {"dev_wallet": "https://solscan.io/account/" + DEV},
                   "source": {"rpc_host": "example"}}
         orig = tools.get_dev_launches
+        orig_f = tools.get_dev_funding
         tools.get_dev_launches = lambda *a, **k: sample
+        tools.get_dev_funding = lambda *a, **k: {"ok": True, "summary": {"pattern": "Funded by X."},
+                                                 "first_funding": None, "funder": None}
         try:
             with tempfile.TemporaryDirectory() as d:
                 reports.set_reports_dir(d)
@@ -235,16 +238,161 @@ class TestReportsAndHandlers(Base):
                 text = Path(r["saved_to"]).read_text(encoding="utf-8")
                 self.assertTrue(text.startswith("---\ntype: dev-report"))
                 self.assertIn("not trading advice", text)
+                self.assertIn("Funded by X.", text)
         finally:
             tools.get_dev_launches = orig
+            tools.get_dev_funding = orig_f
             reports.set_reports_dir("")
 
     def test_handlers_never_raise(self):
         for h in [tools.token_authorities, tools.token_holders, tools.token_origin, tools.dev_launches,
-                  reports.tool_save_dev_report]:
+                  tools.launch_buyers, tools.dev_funding, reports.tool_save_dev_report]:
             out = json.loads(h("not a dict"))
             self.assertFalse(out["ok"])
         self.assertTrue(reports.command_token("").startswith("Usage"))
+
+
+def wallets(n):
+    """n deterministic on-curve (key-pair style) addresses."""
+    import hashlib
+    out, i = [], 0
+    while len(out) < n:
+        b = hashlib.sha256(bytes([i])).digest()
+        if tools.is_on_curve(b):
+            out.append(tools._b58encode(b))
+        i += 1
+    return out
+
+
+def borsh(s, pad):
+    b = s.encode().ljust(pad, b"\0")
+    return struct.pack("<I", len(b)) + b
+
+
+def metaplex_bytes(update_authority, is_mutable, creators=0):
+    raw = bytes([4]) + tools._b58decode(update_authority) + tools._b58decode(MINT)
+    raw += borsh("Test Coin", 32) + borsh("TEST", 10) + borsh("https://x.y/z.json", 200) + struct.pack("<H", 0)
+    if creators:
+        raw += bytes([1]) + struct.pack("<I", creators) + (tools._b58decode(WALLET) + b"\1\x64") * creators
+    else:
+        raw += bytes([0])
+    return raw + bytes([0, 1 if is_mutable else 0]) + b"\0" * 20
+
+
+class TestMetadata(Base):
+    def test_metaplex_mutable_and_locked(self):
+        for mutable, creators in ((True, 1), (False, 0)):
+            md = tools.parse_metaplex_metadata(metaplex_bytes(WALLET, mutable, creators))
+            self.assertEqual((md["name"], md["symbol"], md["is_mutable"]), ("Test Coin", "TEST", mutable))
+            self.assertEqual(md["update_authority"], WALLET)
+
+    def test_authorities_include_metadata(self):
+        pda = tools.find_program_address([b"metadata", tools._b58decode(tools.METAPLEX_METADATA_PROGRAM_ID),
+                                          tools._b58decode(MINT)], tools.METAPLEX_METADATA_PROGRAM_ID)[0]
+
+        def acct(params):
+            if params[0] == pda:
+                raw = metaplex_bytes(tools.PUMP_FUN_MINT_AUTHORITY, True)
+                return {"value": {"owner": tools.METAPLEX_METADATA_PROGRAM_ID,
+                                  "data": [base64.b64encode(raw).decode(), "base64"]}}
+            return mint_account()
+
+        rpc.call = FakeRpc(getAccountInfo=acct)
+        r = tools.get_authorities(MINT)
+        self.assertEqual((r["name"], r["can_change_metadata"]), ("Test Coin", True))
+        self.assertEqual(r["metadata"]["update_authority_label"], "pump.fun")
+
+    def test_token2022_metadata_locked(self):
+        ext = [{"extension": "tokenMetadata", "state": {"updateAuthority": None, "name": "A", "symbol": "B", "uri": ""}}]
+        info = {"decimals": 6, "supply": "1", "mintAuthority": None, "freezeAuthority": None, "extensions": ext}
+        rpc.call = FakeRpc(getAccountInfo=mint_account(tools.TOKEN_2022_PROGRAM_ID, info))
+        self.assertIs(tools.get_authorities(MINT)["can_change_metadata"], False)
+
+
+def bal(owner, mint, amount):
+    return {"owner": owner, "mint": mint, "uiTokenAmount": {"amount": str(amount)}}
+
+
+class TestLaunchBuyers(Base):
+    def test_same_block_buyers(self):
+        dev, a, b, late = wallets(4)
+        S, T = 1000, 1_700_000_000
+        create = {"slot": S, "blockTime": T, "transaction": {"signatures": ["c"]},
+                  "meta": {"preTokenBalances": [bal(CURVE, MINT, 10**15)],
+                           "postTokenBalances": [bal(CURVE, MINT, 9 * 10**14), bal(dev, MINT, 10**14)]}}
+        buy_a = {"slot": S, "blockTime": T, "transaction": {"signatures": ["a"]},
+                 "meta": {"preTokenBalances": [], "postTokenBalances": [bal(a, MINT, 5 * 10**13)]}}
+        buy_b = {"slot": S + 1, "blockTime": T, "transaction": {"signatures": ["b"]},
+                 "meta": {"preTokenBalances": [], "postTokenBalances": [bal(b, MINT, 2 * 10**13)]}}
+        later = {"slot": S + 9, "blockTime": T + 5, "transaction": {"signatures": ["l"]},
+                 "meta": {"preTokenBalances": [], "postTokenBalances": [bal(late, MINT, 10**13)]}}
+        origin = {"ok": True, "mint": MINT, "created_slot": S, "creator_wallet": dev, "created_at": "x",
+                  "pump_fun": {"total_supply_raw": 10**15}}
+        held = {a: 5 * 10**13, b: 0, dev: 0}
+
+        def accounts(params):
+            amt = held.get(params[0], 0)
+            return {"value": [{"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": str(amt)}}}}}}]}
+
+        orig = tools.get_origin
+        tools.get_origin = lambda m: origin
+        try:
+            rpc.call = FakeRpc(getTransactionsForAddress={"data": [create, buy_a, buy_b, later], "paginationToken": None},
+                               getTokenAccountsByOwner=accounts)
+            r = tools.get_launch_buyers(MINT)
+            s = r["summary"]
+            self.assertEqual((s["other_buyers"], s["other_buyers_pct"], s["creator_bought_pct"]), (1, 5.0, 10.0))
+            self.assertEqual((s["still_holding"], s["still_holding_pct"]), (1, 5.0))
+            self.assertNotIn(CURVE, [x["wallet"] for x in r["buyers"]])      # PDA excluded
+            r2 = tools.get_launch_buyers(MINT, slots_after=1)
+            self.assertEqual(r2["summary"]["other_buyers"], 2)
+        finally:
+            tools.get_origin = orig
+
+
+def transfer(src, dst, lamports):
+    return {"programId": tools._SYSTEM_PROGRAM_ID, "parsed": {"type": "transfer",
+            "info": {"source": src, "destination": dst, "lamports": lamports}}}
+
+
+class TestDevFunding(Base):
+    def test_first_funder_and_fanout(self):
+        dev, funder, x, y = wallets(4)
+        T = 1_700_000_000
+
+        def t(ts, *ixs):
+            return {"blockTime": ts, "slot": ts, "transaction": {"signatures": [f"s{ts}"],
+                    "message": {"instructions": list(ixs)}}, "meta": {}}
+
+        dev_hist = [t(T, transfer(funder, dev, 2 * 10**9)), t(T + 60, transfer(dev, x, 10**6))]
+        funder_hist = [t(T + 7200, transfer(funder, x, 10**9)), t(T + 3600, transfer(funder, y, 10**9)),
+                       t(T, transfer(funder, dev, 2 * 10**9), transfer(funder, x, 1))]
+
+        def gtfa(params):
+            if params[0] != dev:
+                return {"data": funder_hist, "paginationToken": None}
+            lt = ((params[1].get("filters") or {}).get("slot") or {}).get("lt")
+            if lt is not None:                                   # "newest before launch" query
+                return {"data": [t for t in reversed(dev_hist) if t["slot"] < lt], "paginationToken": None}
+            return {"data": dev_hist, "paginationToken": None}
+
+        orig = tools.get_origin
+        tools.get_origin = lambda m: {"ok": True, "mint": MINT, "creator_wallet": dev, "created_at": "x",
+                                      "created_unix": T + 600, "created_slot": T + 600}
+        try:
+            rpc.call = FakeRpc(getTransactionsForAddress=gtfa)
+            r = tools.get_dev_funding(mint=MINT)
+            self.assertEqual((r["first_funding"]["from"], r["first_funding"]["sol"]), (funder, 2.0))
+            self.assertEqual(r["first_funding"]["minutes_before_launch"], 10.0)
+            self.assertEqual((r["funder"]["distinct_wallets_funded"], r["funder"]["scanned_period_hours"]), (3, 2.0))
+            self.assertEqual(r["last_funding_before_launch"]["before_launch"], "10.0 min")
+            self.assertIn("3 different wallets", r["summary"]["pattern"])
+            self.assertIn("10.0 min before launch", r["summary"]["pattern"])
+        finally:
+            tools.get_origin = orig
+
+    def test_bad_wallet(self):
+        self.assertEqual(tools.get_dev_funding("nope")["error"]["kind"], "invalid_wallet")
 
 
 if __name__ == "__main__":

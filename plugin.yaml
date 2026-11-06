@@ -1,10 +1,11 @@
 name: solana-token-facts
-version: 0.1.0
+version: 0.2.0
 description: >-
   Solana token facts from on-chain data (read-only on-chain): mint and freeze authority,
-  supply, Token vs Token-2022 and risky extensions, top holders and supply
-  concentration, creation time, creator wallet and launchpad, and a developer's past
-  launches (graduated, dev sold out, timing), recent pump.fun -> PumpSwap graduations. Optional dev reports saved as
+  supply, Token vs Token-2022 and risky extensions, whether metadata can still change,
+  top holders and supply concentration, wallets that bought in the creation block,
+  creation time, creator wallet and launchpad, who funded the dev wallet, a developer's
+  past launches (graduated, dev sold out, timing), recent pump.fun -> PumpSwap graduations. Optional dev reports saved as
   local Markdown notes (e.g. an Obsidian vault). /token slash command. No trading, no wallet keys.
   Disclosure: makes outbound HTTPS JSON-RPC calls to a Solana RPC endpoint
   (default https://api.mainnet-beta.solana.com; or your own provider via the
@@ -25,13 +26,15 @@ provides_tools:
   - dev_launches
   - save_dev_report
   - recent_graduations
+  - launch_buyers
+  - dev_funding
 
 config_schema:
   rpc_secret_url:
     type: secret
     env: SOLANA_TOKEN_FACTS_RPC_URL
     label: "Private RPC URL (with API key)"
-    description: "Recommended. A provider URL such as https://mainnet.helius-rpc.com/?api-key=... Stored as a Hermes secret (.env), never in config.yaml. Used instead of rpc_url when set. token_holders, dev_launches and recent_graduations need a Helius URL."
+    description: "Recommended. A provider URL such as https://mainnet.helius-rpc.com/?api-key=... Stored as a Hermes secret (.env), never in config.yaml. Used instead of rpc_url when set. token_holders, dev_launches, launch_buyers, dev_funding and recent_graduations need a Helius URL."
   rpc_url:
     type: str
     default: "https://api.mainnet-beta.solana.com"

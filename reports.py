@@ -50,8 +50,8 @@ def _num(v, suffix=""):
     return "unknown" if v is None else f"{v}{suffix}"
 
 
-def render_dev_report(dev):
-    """Markdown note for one dev_launches result."""
+def render_dev_report(dev, funding=None, buyers=None):
+    """Markdown note for one dev_launches result (+ optional dev_funding / launch_buyers results)."""
     s = dev["summary"]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     w = dev["dev_wallet"]
@@ -91,6 +91,28 @@ def render_dev_report(dev):
         )
     if not dev["launches"]:
         lines.append("| – | no launches found in the scanned history | | | | | |")
+    if funding and funding.get("ok"):
+        ff, fu = funding.get("first_funding"), funding.get("funder")
+        lines += ["", "## Funding", "", f"**{(funding.get('summary') or {}).get('pattern', '')}**", ""]
+        lf = funding.get("last_funding_before_launch")
+        if lf:
+            lines.append(f"- Last SOL in before launch: {lf['sol']} SOL from [{lf['from']}]({lf['links']['from']}) at "
+                         f"{lf['at'] or 'unknown'}, {lf.get('before_launch') or 'unknown time'} before launch ([tx]({lf['links']['tx']}))")
+        if ff:
+            lines.append(f"- First SOL ever: {ff['sol']} SOL from [{ff['from']}]({ff['links']['from']}) at {ff['at'] or 'unknown'} "
+                         f"([tx]({ff['links']['tx']}))")
+        if fu:
+            lines.append(f"- Funder's last {fu['recent_transactions_scanned']} transactions"
+                         f" ({_num(fu['scanned_period_hours'], ' h')}): SOL sent to {fu['distinct_wallets_funded']} different wallets")
+        if funding.get("wallet_first_activity"):
+            lines.append(f"- Dev wallet first active: {funding['wallet_first_activity']}")
+    if buyers and buyers.get("ok"):
+        bs = buyers["summary"]
+        lines += ["", f"## Launch-block buyers ({_short(buyers['mint'])})", "", f"**{bs['pattern']}**", "",
+                  "| Wallet | Creator | Bought % | Holds now % |", "|---|---|---|---|"]
+        for b in buyers["buyers"][:10]:
+            lines.append(f"| [{_short(b['wallet'])}]({b['links']['wallet']}) | {_yes_no(b['is_creator'])} | "
+                         f"{_num(b['bought_pct'], '%')} | {_num(b['holds_now_pct'], '%')} |")
     h = dev["history_scanned"]
     lines += [
         "",
@@ -113,17 +135,28 @@ def save_dev_report(wallet=None, mint=None):
     dev = tools.get_dev_launches(wallet, mint)
     if not dev.get("ok"):
         return dev
+    # Extra facts for the note; each is optional and never stops the report from saving.
+    try:
+        funding = tools.get_dev_funding(mint=mint) if mint else tools.get_dev_funding(dev["dev_wallet"])
+    except Exception:
+        funding = None
+    try:
+        buyers = tools.get_launch_buyers(mint) if mint else None
+    except Exception:
+        buyers = None
     folder = reports_dir()
     try:
         folder.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9]", "", dev["dev_wallet"])
         path = folder / f"dev-{safe}.md"
-        path.write_text(render_dev_report(dev), encoding="utf-8")
+        path.write_text(render_dev_report(dev, funding, buyers), encoding="utf-8")
     except OSError as e:
         return {"ok": False, "error": {"kind": "write_failed",
                 "message": f"Could not write the report to {folder}: {e}. Check the reports_dir setting."}}
     return {"ok": True, "saved_to": str(path), "dev_wallet": dev["dev_wallet"],
             "summary": dev["summary"],
+            "funding_pattern": ((funding or {}).get("summary") or {}).get("pattern"),
+            "launch_buyers_pattern": ((buyers or {}).get("summary") or {}).get("pattern"),
             "note": "Report saved as a Markdown note (opens in Obsidian or any editor). Re-running updates it."}
 
 
@@ -148,6 +181,12 @@ def fact_sheet(mint):
     out.append(f"  Can freeze accounts: {_yes_no(a['can_freeze_accounts'])}" + (f" (authority {a['freeze_authority']})" if a["can_freeze_accounts"] else ""))
     for r in a["risky_extensions"]:
         out.append(f"  Extension {r['extension']}: {r['allows']}")
+    md = a.get("metadata") or {}
+    if md:
+        who = md.get("update_authority_label") or md.get("update_authority")
+        out.append(f"  Name / symbol: {md.get('name') or 'unknown'} / {md.get('symbol') or 'unknown'}")
+        out.append(f"  Can change name, symbol or image: {_yes_no(md.get('can_change'))}"
+                   + (f" (update authority {who})" if md.get("can_change") and who else ""))
 
     o = tools.get_origin(m)
     out += ["", "ORIGIN"]
@@ -174,10 +213,17 @@ def fact_sheet(mint):
     else:
         out.append(f"  unavailable: {h['error']['message']}")
 
+    if o.get("ok") and o.get("created_slot") is not None:
+        b = tools.get_launch_buyers(m)
+        out += ["", "LAUNCH-BLOCK BUYERS"]
+        out.append(f"  {b['summary']['pattern']}" if b.get("ok") else f"  unavailable: {b['error']['message']}")
+
     if o.get("ok") and o.get("creator_wallet"):
         d = tools.get_dev_launches(o["creator_wallet"])
         out += ["", "DEV HISTORY"]
         out.append(f"  {d['summary']['pattern']}" if d.get("ok") else f"  unavailable: {d['error']['message']}")
+        f = tools.get_dev_funding(mint=m)
+        out.append(f"  {f['summary']['pattern']}" if f.get("ok") else f"  Funding unavailable: {f['error']['message']}")
 
     out += ["", "Facts from on-chain data only, not trading advice.",
             "Say 'save a dev report' to keep the dev's history as a note."]

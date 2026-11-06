@@ -14,16 +14,18 @@ predictions, no "buy" or "sell", no trading, no wallet keys.
 
 | Tool | Answers | Main RPC calls |
 |---|---|---|
-| `token_authorities` | Can more be minted? Can holders be frozen? Supply, Token vs Token-2022, risky extensions (permanent delegate, transfer hook, pausable, fees…) | `getAccountInfo` |
+| `token_authorities` | Can more be minted? Can holders be frozen? Can the name, symbol or image still be changed (and by whom)? Supply, Token vs Token-2022, risky extensions (permanent delegate, transfer hook, pausable, fees…) | `getAccountInfo` (mint + Metaplex metadata) |
 | `token_origin` | When was it created, by which wallet, on which launchpad (pump.fun, Raydium LaunchLab, Meteora, Moonshot, boop.fun), graduated or not | `getTransactionsForAddress` (oldest first), `getTransaction` |
 | `token_holders` | Top holder wallets, top 1/5/10 concentration, wallet vs program address, pump.fun bonding curve labelled | `getTokenLargestAccounts`, `getMultipleAccounts` |
+| `launch_buyers` | Which wallets bought in the same block the token was created (bundles / snipers), how much of the supply, and how much they still hold | `getTransactionsForAddress` (oldest first), `getTokenAccountsByOwner` |
+| `dev_funding` | Who sent the dev wallet its first SOL, how much, how many minutes before launch, and how many different wallets that funder sends SOL to | `getTransactionsForAddress` |
 | `dev_launches` | A developer's recent launches: graduated?, dev's buy at launch, did the dev sell out and how many minutes after launch, plus a one-line pattern | `getTransactionsForAddress` |
 | `recent_graduations` | The newest pump.fun → PumpSwap graduations | `getTransactionsForAddress` |
 | `save_dev_report` | Saves a dev's track record as a Markdown note (Obsidian-ready) | same as `dev_launches` |
 
 Also included:
 
-- **`/token <mint>`**: a one-shot fact sheet (powers, origin, holders, dev history) without asking the model.
+- **`/token <mint>`**: a one-shot fact sheet (powers, metadata, origin, holders, launch-block buyers, dev history and funding) without asking the model.
 - **Skill `solana-token-facts:token-due-diligence`**: the order of checks and the "facts, no verdicts" rules the agent follows.
 - **Automation blueprint `graduation-dev-watch`** (opt-in, via `/blueprint`): every few hours, list new PumpSwap graduations, check each developer and save a report for devs that match your filter (for example "has at least 3 launches"). Hermes' own scheduler runs it; the plugin never runs anything in the background.
 
@@ -80,6 +82,8 @@ Deeper dev history costs more RPC credits. That is why the defaults are small: r
 Who controls the USDC token EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v?
 What graduated to PumpSwap most recently? Check the newest one's developer and save a dev report.
 Has the developer of <mint> launched tokens before?
+Who bought <mint> in its launch block, and do they still hold?
+Who funded the developer of <mint>?
 ```
 
 ## How the facts are worked out (and their limits)
@@ -88,6 +92,9 @@ Has the developer of <mint> launched tokens before?
 - **Who is the dev.** The wallet that *signed* the token's creation transaction. pump.fun also stores a "creator" that receives creator fees; it can be a wallet that never signs anything, so it is reported separately as `creator_fee_recipient`.
 - **Graduated.** Read from the pump.fun bonding curve account (PDA `["bonding-curve", mint]`), byte 48 = complete.
 - **Dev sold out.** The dev wallet's balance of that token, from the transactions' pre/post token balances, went to zero; the minutes are counted from the launch transaction.
+- **Metadata can change.** Read from the token's Metaplex metadata account (PDA `["metadata", program, mint]`): `is_mutable` and its update authority. Token-2022 tokens with built-in metadata: the `tokenMetadata` extension's update authority (`null` = locked).
+- **Launch-block buyers.** Every key-pair wallet whose balance of the token rose in a transaction in the creation slot (program addresses such as the bonding curve are excluded). Same-block buying is a timing fact; it does not prove who controls those wallets.
+- **Dev funding.** The dev wallet's first SOL transfer ever and the last one before the launch (transfers under 0.01 SOL are ignored as spam), then the funder's last 100 transactions: how many different wallets it sent SOL to. A funder that pays thousands of wallets is usually an exchange; the tool reports the numbers and leaves the label to you.
 - **Recent graduations** come from the history of pump.fun's migration account and are verified against a completed bonding curve (this filters out the pool's LP token).
 - **Limits.** `token_holders` sees the 20 largest token accounts (an RPC limit), so concentration is a lower bound; tokens with millions of holders (USDC) are refused by RPCs. `dev_launches` counts launches where the dev's wallet paid the fee, within the scanned history.
 
@@ -120,6 +127,7 @@ cd /tmp && hermes -t solana_token_facts -s solana-token-facts:token-due-diligenc
 ## Roadmap
 
 - Push-based alerts for the graduation watcher (streaming instead of polling).
+- Funder graph: check whether the other wallets a funder pays are also token developers.
 - Dev filters across larger histories (e.g. "devs with 100+ launches and 50%+ graduated").
 - More launchpads in `dev_launches`.
 - A *separate*, opt-in trading plugin could use these facts as guardrails. This plugin stays read-only.

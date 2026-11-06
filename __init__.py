@@ -42,12 +42,14 @@ def register(ctx):
         ("dev_launches", schemas.DEV_LAUNCHES, tools.dev_launches),
         ("save_dev_report", schemas.SAVE_DEV_REPORT, reports.tool_save_dev_report),
         ("recent_graduations", schemas.RECENT_GRADUATIONS, tools.recent_graduations),
+        ("launch_buyers", schemas.LAUNCH_BUYERS, tools.launch_buyers),
+        ("dev_funding", schemas.DEV_FUNDING, tools.dev_funding),
     ]:
         ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler)
 
     # 3. Slash command: /token <mint> prints the full fact sheet without asking the model.
     ctx.register_command("token", handler=reports.command_token,
-                         description="Solana token fact sheet: powers, origin, holders, dev history",
+                         description="Solana token fact sheet: powers, metadata, origin, holders, launch buyers, dev history and funding",
                          args_hint="<mint>")
 
     # 4. Automation blueprint: an opt-in scheduled job the user can switch on (/blueprint).
