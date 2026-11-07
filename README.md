@@ -96,6 +96,7 @@ Who funded the developer of <mint>?
 - **Launch-block buyers.** Every key-pair wallet whose balance of the token rose in a transaction in the creation slot (program addresses such as the bonding curve are excluded). Same-block buying is a timing fact; it does not prove who controls those wallets.
 - **Dev funding.** The dev wallet's first SOL transfer ever and the last one before the launch (transfers under 0.01 SOL are ignored as spam), then the funder's last 100 transactions: how many different wallets it sent SOL to. A funder that pays thousands of wallets is usually an exchange; the tool reports the numbers and leaves the label to you.
 - **Recent graduations** come from the history of pump.fun's migration account and are verified against a completed bonding curve (this filters out the pool's LP token).
+- **Untrusted text.** Token names, symbols and URIs are written by whoever created the token, so they are cleaned (invisible and control characters removed, length capped) and labelled as untrusted, and the agent is told to quote them as data and never follow instructions inside them.
 - **Limits.** `token_holders` sees the 20 largest token accounts (an RPC limit), so concentration is a lower bound; tokens with millions of holders (USDC) are refused by RPCs. `dev_launches` counts launches where the dev's wallet paid the fee, within the scanned history.
 
 ## Disclosure

@@ -1,5 +1,5 @@
 name: solana-token-facts
-version: 0.2.0
+version: 0.2.1
 description: >-
   Solana token facts from on-chain data (read-only on-chain): mint and freeze authority,
   supply, Token vs Token-2022 and risky extensions, whether metadata can still change,
